@@ -825,7 +825,11 @@ def _apply_one(
         # (tenancy_restriction_profile, dlp_engine, etc.) lack the field entirely
         # and the ZIA API rejects the unexpected key with a 400.
         if "order" in (rec.source_raw or {}):
-            payload["order"] = _next_order(target_tenant_id, rtype)
+            src_order = (rec.source_raw or {}).get("order")
+            next_order = _next_order(target_tenant_id, rtype)
+            # Preserve source relative position; clamp to end if source order
+            # exceeds what the target currently has.
+            payload["order"] = src_order if isinstance(src_order, int) and src_order <= next_order else next_order
 
     # Reduce embedded ref objects to [{id}] and apply per-type fixups
     payload = _slim_payload(rtype, payload)
