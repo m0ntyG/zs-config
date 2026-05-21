@@ -705,7 +705,11 @@ function SSLTlsSection() {
             <div>
               <button
                 type="button"
-                onClick={() => setShowFido2Confirm(true)}
+                onClick={() => {
+                  const originChanging = !sslStatus?.active || sslStatus.domain !== domain.trim();
+                  if (originChanging) setShowFido2Confirm(true);
+                  else handleUpload();
+                }}
                 disabled={
                   !domain.trim() ||
                   (selectedTab === "pfx" && !pfxFile) ||

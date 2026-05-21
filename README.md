@@ -69,6 +69,16 @@ You will be prompted to set a permanent password on first login.
 
 **Subsequent deploys** (pull latest and rebuild): just run `./deploy.sh` or `.\deploy.ps1` again.
 
+### HTTPS / SSL (optional)
+
+SSL can be configured two ways:
+
+**At deploy time** — `deploy.sh` prompts for a cert and key file path, copies them into `./certs/`, and writes `ZS_SSL_DOMAIN` to `.env`. The container starts directly in HTTPS mode on port 8443; HTTP on port 8000 redirects automatically. To rotate a cert, replace the files in `./certs/` and restart the container.
+
+**Via the web UI** — go to Admin → Settings → SSL Certificate after first login. Upload a PEM or PFX bundle; the container restarts automatically.
+
+For server deployments (non-localhost), set `BIND_ADDR=0.0.0.0` in `.env` so port 8443 is reachable from outside the host. `deploy.sh` prompts for this automatically.
+
 ### Upgrade from v1.x TUI
 
 Export your existing database and encryption key, then import via **Admin → Settings → Import Database**:

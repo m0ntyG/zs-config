@@ -13,6 +13,7 @@ services:
     volumes:
       - zs-db:/data/db
       - zs-plugins:/data/plugins
+      - ./certs:/certs:ro
     environment:
       ZS_CONTAINER_MODE: "1"
       ZSCALER_DB_PATH: /data/db/zscaler.db
@@ -26,6 +27,9 @@ services:
       # WEBAUTHN_ORIGIN: "https://your-host.example.com:8443"
       # Override the build-time CA bundle at runtime (e.g. if cert changes after image build)
       # REQUESTS_CA_BUNDLE: /data/db/ca-bundle.pem
+      # Set by deploy.sh when SSL cert files are provided at deploy time.
+      # Can also be set manually here or in .env to enable HTTPS on startup:
+      # ZS_SSL_DOMAIN: ""
       # TUI-only mode: set to "1" to launch the TUI directly instead of the web UI.
       # Access via: docker exec -it zs-config python -m cli.z_config
       # The HEALTHCHECK will fail in TUI mode — add "healthcheck: disable" to your override.

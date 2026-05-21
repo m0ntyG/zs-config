@@ -5,6 +5,27 @@ if [ "${ZS_TUI_ONLY}" = "1" ]; then
     exec python -m cli.z_config
 fi
 
+# Bootstrap SSL from mounted cert files if ZS_SSL_DOMAIN is set.
+# Runs every startup so cert rotation takes effect on container restart.
+if [ -n "${ZS_SSL_DOMAIN:-}" ] && [ -f "/certs/cert.pem" ] && [ -f "/certs/key.pem" ]; then
+    python -c "
+import os, shutil, pathlib, sys
+sys.path.insert(0, '.')
+from db.database import set_setting
+ssl_dir = pathlib.Path('/data/db/ssl')
+ssl_dir.mkdir(parents=True, exist_ok=True)
+shutil.copy('/certs/cert.pem', str(ssl_dir / 'cert.pem'))
+shutil.copy('/certs/key.pem', str(ssl_dir / 'key.pem'))
+os.chmod(str(ssl_dir / 'key.pem'), 0o600)
+domain = os.environ['ZS_SSL_DOMAIN']
+set_setting('ssl_mode', 'upload')
+set_setting('ssl_domain', domain)
+set_setting('webauthn_origin', f'https://{domain}:8443')
+set_setting('webauthn_rp_id', domain)
+print(f'SSL bootstrapped from /certs for domain: {domain}')
+" || echo "WARNING: SSL bootstrap from /certs failed — check cert files and permissions"
+fi
+
 # Determine SSL mode from DB at startup
 SSL_CMD=$(python -c "
 import os, sys
