@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.1.0] - 2026-05-21
+
+### Added
+
+- **SSL/TLS certificate support** — upload a certificate bundle (PEM paste with separate leaf, CA chain, and private key fields; PEM file; or PFX/PKCS#12) via Admin Settings to enable HTTPS on port 8443. The container restarts automatically to apply the new mode. TLS 1.2+ is enforced; TLS 1.0 and 1.1 are rejected.
+- **HTTP → HTTPS redirect** — when SSL is enabled, port 8000 issues a cached `301` redirect to the HTTPS URL. A `Strict-Transport-Security` header on HTTPS responses tells browsers to bypass the redirect on all future visits.
+- **WebAuthn origin auto-update** — enabling SSL automatically updates the stored WebAuthn RP ID and origin to match the HTTPS domain. A confirmation dialog warns that all existing passkey and security key registrations will be invalidated before proceeding.
+- **Domain-validated redirect** — the HTTP redirect target uses the domain validated against the uploaded certificate at upload time, not the incoming `Host` header.
+- **Disable SSL** — removing SSL restores HTTP mode, resets the WebAuthn origin, and deletes the stored certificate files.
+
+---
+
 ## [3.0.2] - 2026-05-20
 
 ### Fixed
