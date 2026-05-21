@@ -206,6 +206,11 @@ def process_pem_text(pem_text: str, domain: str) -> ParsedCertBundle:
 
 
 def save_bundle(bundle: ParsedCertBundle, domain: str) -> None:
+    # Read before write so we can decide whether credentials need invalidating.
+    old_mode   = get_setting("ssl_mode") or "none"
+    old_domain = get_setting("ssl_domain") or ""
+    origin_changing = old_mode != "upload" or old_domain != domain
+
     try:
         SSL_DIR.mkdir(parents=True, exist_ok=True)
         CERT_PATH.write_text(_serialize_chain(bundle.chain))
@@ -217,8 +222,9 @@ def save_bundle(bundle: ParsedCertBundle, domain: str) -> None:
     set_setting("ssl_domain", domain)
     set_setting("webauthn_origin", f"https://{domain}:8443")
     set_setting("webauthn_rp_id", domain)
-    with get_session() as session:
-        session.query(WebAuthnCredential).delete()
+    if origin_changing:
+        with get_session() as session:
+            session.query(WebAuthnCredential).delete()
     audit_service.log(
         product="system",
         operation="ssl_upload",

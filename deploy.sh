@@ -157,6 +157,43 @@ if [[ -z "${BIND_ADDR:-}" ]]; then
     echo ""
 fi
 
+# ── SSL certificate (optional) ────────────────────────────────────────────────
+# If ZS_SSL_DOMAIN is already set (from .env or environment), skip prompting.
+
+if [[ -z "${ZS_SSL_DOMAIN:-}" ]] && [[ -t 0 ]]; then
+    echo ""
+    echo "SSL certificate (optional):"
+    echo "  Skip to use HTTP on port 8000, or provide a cert to enable HTTPS on port 8443."
+    read -r -p "Configure SSL now? [y/N]: " _ssl_choice
+    if [[ "${_ssl_choice:-N}" =~ ^[Yy]$ ]]; then
+        read -r -p "Domain (CN/SAN on the cert, e.g. myapp.company.com): " ZS_SSL_DOMAIN
+        read -r -p "Path to certificate file (PEM — leaf + CA chain): " _cert_src
+        read -r -p "Path to private key file (PEM): " _key_src
+
+        if [[ ! -f "$_cert_src" ]]; then
+            echo "ERROR: Certificate file not found: $_cert_src" >&2
+            exit 1
+        fi
+        if [[ ! -f "$_key_src" ]]; then
+            echo "ERROR: Key file not found: $_key_src" >&2
+            exit 1
+        fi
+
+        mkdir -p "$REPO_DIR/certs"
+        cp "$_cert_src" "$REPO_DIR/certs/cert.pem"
+        cp "$_key_src"  "$REPO_DIR/certs/key.pem"
+        chmod 600 "$REPO_DIR/certs/key.pem"
+
+        echo "ZS_SSL_DOMAIN=${ZS_SSL_DOMAIN}" >> "$REPO_DIR/.env"
+        echo "SSL configured for domain ${ZS_SSL_DOMAIN} — cert files copied to $REPO_DIR/certs/"
+        echo ""
+    fi
+fi
+
+# Always ensure the certs directory exists so the ./certs:/certs:ro bind mount
+# in docker-compose.yml never fails on a fresh clone with no certs provided.
+mkdir -p "$REPO_DIR/certs"
+
 # ── Ensure persistent Docker volumes exist ────────────────────────────────────
 
 for vol in zs-config_zs-db zs-config_zs-plugins; do
@@ -212,7 +249,12 @@ echo "Waiting for health check..."
 for i in $(seq 1 15); do
     if curl -sf http://localhost:8000/health &>/dev/null; then
         echo ""
-        echo "zs-config is running at http://localhost:8000"
+        if [[ -n "${ZS_SSL_DOMAIN:-}" ]]; then
+            echo "zs-config is running at https://${ZS_SSL_DOMAIN}:8443"
+            echo "(HTTP on port 8000 redirects to HTTPS)"
+        else
+            echo "zs-config is running at http://localhost:8000"
+        fi
         echo ""
         docker compose logs --tail=5
         exit 0

@@ -7,13 +7,12 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.0.2
+## What's New — v3.1.0
 
-> **v3.0.2 is the current release** — scheduled sync reliability fixes. See the [changelog](CHANGELOG.md) for details.
+> **v3.1.0 is the current release** — SSL/TLS certificate support. See the [changelog](CHANGELOG.md) for details.
 
-- **Location/location group remapping by name** — scheduled sync now resolves location and location group references to the correct target-tenant IDs by name, rather than passing source-tenant IDs verbatim.
-- **Reorder operations clamped to target rule count** — `order` values are clamped to the target tenant's current rule count, preventing out-of-range API errors.
-- **Empty field stripping** — `user_risk_score_levels` and other empty arrays are stripped before sync to avoid API rejections.
+- **HTTPS termination** — upload a certificate bundle via Admin Settings to enable HTTPS on port 8443. TLS 1.2+ enforced; HTTP on port 8000 redirects automatically with a cached 301.
+- **WebAuthn origin auto-update** — enabling SSL updates the stored RP ID and origin to match the HTTPS domain and invalidates existing passkey registrations with a confirmation prompt.
 
 ---
 
@@ -69,6 +68,16 @@ docker compose logs | grep "Initial password"
 You will be prompted to set a permanent password on first login.
 
 **Subsequent deploys** (pull latest and rebuild): just run `./deploy.sh` or `.\deploy.ps1` again.
+
+### HTTPS / SSL (optional)
+
+SSL can be configured two ways:
+
+**At deploy time** — `deploy.sh` prompts for a cert and key file path, copies them into `./certs/`, and writes `ZS_SSL_DOMAIN` to `.env`. The container starts directly in HTTPS mode on port 8443; HTTP on port 8000 redirects automatically. To rotate a cert, replace the files in `./certs/` and restart the container.
+
+**Via the web UI** — go to Admin → Settings → SSL Certificate after first login. Upload a PEM or PFX bundle; the container restarts automatically.
+
+For server deployments (non-localhost), set `BIND_ADDR=0.0.0.0` in `.env` so port 8443 is reachable from outside the host. `deploy.sh` prompts for this automatically.
 
 ### Upgrade from v1.x TUI
 
