@@ -1373,6 +1373,13 @@ class ZIAService:
             return [d for d in rows[0].get("domains", []) if isinstance(d, str) and d]
         return self.client.get_org_domains()
 
+    def get_sub_clouds(self) -> List[Dict]:
+        """Return subclouds, reading from local DB when available."""
+        rows = self._list_from_db("sub_cloud")
+        if rows:
+            return rows
+        return self.client.list_sub_clouds()
+
     def list_pac_files(self) -> List[Dict]:
         rows = self._list_from_db("pac_file")
         if rows:

@@ -67,6 +67,7 @@ import {
   updatePacFile,
   deletePacFile,
   fetchOrgDomains,
+  fetchSubClouds,
   UrlCategory,
   UrlCategoryDetail,
   UrlFilteringRule,
@@ -2053,8 +2054,8 @@ interface GatewayConfig {
   lbIndex: number;             // 0–7, used when lbMode === "index"
   port: string;                // e.g. "9400" or "${ZS_CUSTOM_PORT}"
   useSubcloud: boolean;
-  subcloadName: string;        // e.g. "myorg"
-  subcloadDomain: string;      // e.g. "zscaler.net"
+  subcloudName: string;        // e.g. "myorg"
+  subcloudCloud: string;       // e.g. "zscaler" — ".net" is always appended
   includeSecondary: boolean;
   fallbackDirect: boolean;
 }
@@ -2068,19 +2069,24 @@ interface PacBuilderConfig {
   defaultAction: "PROXY" | "DIRECT";
 }
 
+// Produces e.g. ".myorg.zscaler.net" — always appends ".net" per Zscaler spec.
+function subcloudSuffix(gw: GatewayConfig): string {
+  return gw.useSubcloud && gw.subcloudName && gw.subcloudCloud
+    ? `.${gw.subcloudName}.${gw.subcloudCloud}.net` : "";
+}
+
 function buildGatewayVar(gw: GatewayConfig): string {
   if (gw.varType === "custom") return gw.customAddress || "gateway.zscaler.net";
-  const sub = gw.useSubcloud && gw.subcloadName && gw.subcloadDomain
-    ? `.${gw.subcloadName}.${gw.subcloadDomain}` : "";
+  const sub = subcloudSuffix(gw);
   const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
   const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
   return `\${GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
 }
 
 function buildSecondaryVar(gw: GatewayConfig): string {
-  const sep = gw.useSubcloud && gw.subcloadName ? "." : "_";
-  const sub = gw.useSubcloud && gw.subcloadName && gw.subcloadDomain
-    ? `.${gw.subcloadName}.${gw.subcloadDomain}` : "";
+  const sub = subcloudSuffix(gw);
+  // Standard (no subcloud): SECONDARY_GATEWAY; subcloud: SECONDARY.GATEWAY per Zscaler docs.
+  const sep = sub ? "." : "_";
   const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
   const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
   return `\${SECONDARY${sep}GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
@@ -2225,8 +2231,8 @@ function PacFileModal({
       lbIndex: 0,
       port: "9400",
       useSubcloud: false,
-      subcloadName: "",
-      subcloadDomain: "zscaler.net",
+      subcloudName: "",
+      subcloudCloud: "zscaler",
       includeSecondary: true,
       fallbackDirect: true,
     },
@@ -2262,6 +2268,21 @@ function PacFileModal({
     staleTime: 5 * 60 * 1000,
   });
   const orgDomains: string[] = domainsQuery.data ?? [];
+
+  // Subclouds dropdown + auto-fill cloud name from zia_cloud
+  const subCloudsQuery = useQuery({
+    queryKey: ["zia-sub-clouds", tenantName],
+    queryFn: () => fetchSubClouds(tenantName),
+    staleTime: 5 * 60 * 1000,
+  });
+  const subClouds = subCloudsQuery.data?.subclouds ?? [];
+  useEffect(() => {
+    if (subCloudsQuery.data?.zia_cloud) {
+      const cloud = subCloudsQuery.data.zia_cloud.replace(/\.net$/i, "");
+      patchGateway({ subcloudCloud: cloud });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subCloudsQuery.data?.zia_cloud]);
 
   // Version history (edit mode)
   const versionsQuery = useQuery({
@@ -2515,22 +2536,42 @@ function PacFileModal({
                     Organization uses a subcloud
                   </label>
                   {builder.gateway.useSubcloud && (
-                    <div className="ml-5 mt-1 flex gap-2 items-center">
-                      <input
-                        type="text"
-                        value={builder.gateway.subcloadName}
-                        onChange={(e) => patchGateway({ subcloadName: e.target.value })}
-                        placeholder="myorg"
-                        className="w-32 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
-                      />
-                      <span className="text-xs text-gray-400">.</span>
-                      <input
-                        type="text"
-                        value={builder.gateway.subcloadDomain}
-                        onChange={(e) => patchGateway({ subcloadDomain: e.target.value })}
-                        placeholder="zscaler.net"
-                        className="w-36 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
-                      />
+                    <div className="ml-5 mt-1.5 space-y-1.5">
+                      <div className="flex gap-2 items-center">
+                        {subClouds.length > 0 ? (
+                          <select
+                            value={builder.gateway.subcloudName}
+                            onChange={(e) => patchGateway({ subcloudName: e.target.value })}
+                            className="w-40 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                          >
+                            <option value="">— select —</option>
+                            {subClouds.map((sc) => (
+                              <option key={sc.id} value={sc.name}>{sc.name}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={builder.gateway.subcloudName}
+                            onChange={(e) => patchGateway({ subcloudName: e.target.value })}
+                            placeholder="myorg"
+                            className="w-32 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                          />
+                        )}
+                        <span className="text-xs text-gray-400">.</span>
+                        <span className="text-sm font-mono text-gray-600 min-w-[4rem]">
+                          {builder.gateway.subcloudCloud || "zscaler"}
+                        </span>
+                        <span className="text-xs text-gray-400 font-mono">.net</span>
+                      </div>
+                      {subClouds.length === 0 && (
+                        <p className="text-xs text-gray-400">No subclouds found in local DB — run an import first, or enter manually above.</p>
+                      )}
+                      {builder.gateway.subcloudName && builder.gateway.subcloudCloud && (
+                        <p className="text-xs text-gray-500 font-mono">
+                          → {`\${GATEWAY.${builder.gateway.subcloudName}.${builder.gateway.subcloudCloud}.net}`}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

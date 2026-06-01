@@ -1378,6 +1378,13 @@ class ZIAClient:
         )
         _unwrap(result, resp, err)
 
+    def list_sub_clouds(self) -> List[Dict]:
+        if self._govcloud:
+            data = self.zia_get("/zia/api/v1/subclouds")
+            return data if isinstance(data, list) else []
+        result, resp, err = self._sdk.zia.sub_clouds.list_sub_clouds()
+        return _to_dicts(_unwrap(result, resp, err))
+
     def list_gre_tunnels(self) -> List[Dict]:
         if self._govcloud:
             data = self.zia_get("/zia/api/v1/greTunnels")

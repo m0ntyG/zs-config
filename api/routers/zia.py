@@ -837,6 +837,22 @@ def delete_snapshot(
 # Organization
 # ------------------------------------------------------------------
 
+@router.get("/{tenant}/sub-clouds")
+def get_sub_clouds(tenant: str, user: AuthUser = Depends(require_auth)):
+    """Return subclouds and detected ZIA cloud name; reads from local DB when available."""
+    from services.config_service import get_tenant
+    from api.dependencies import check_tenant_access
+    t = get_tenant(tenant)
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant}' not found")
+    check_tenant_access(t.id, user)
+    try:
+        svc = _get_service(tenant, user)
+        return {"subclouds": svc.get_sub_clouds(), "zia_cloud": t.zia_cloud or ""}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{tenant}/org-domains")
 def get_org_domains(tenant: str, user: AuthUser = Depends(require_auth)):
     """Return org domains; reads from local DB when available, falls back to live API."""

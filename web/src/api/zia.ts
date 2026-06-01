@@ -775,3 +775,16 @@ export const deletePacFile = (
 
 export const fetchOrgDomains = (tenant: string): Promise<string[]> =>
   apiFetch<string[]>(`${base(tenant)}/org-domains`);
+
+export interface SubCloud {
+  id: number;
+  name: string;
+}
+
+export interface SubCloudsResult {
+  subclouds: SubCloud[];
+  zia_cloud: string;
+}
+
+export const fetchSubClouds = (tenant: string): Promise<SubCloudsResult> =>
+  apiFetch<SubCloudsResult>(`${base(tenant)}/sub-clouds`);
