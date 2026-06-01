@@ -88,6 +88,9 @@ import {
   fetchUserPortals,
   patchUserPortalEnabled,
   deleteUserPortal,
+  fetchZpaSnapshotDiff,
+  restoreZpaSnapshot,
+  ZpaRestoreResult,
   listConnectors,
   patchConnectorEnabled,
   patchConnectorName,
@@ -5183,6 +5186,292 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
   );
 }
 
+// ── ZpaRestoreModal ────────────────────────────────────────────────────────────
+
+function ZpaRestoreModal({
+  tenant,
+  snapshot,
+  onClose,
+}: {
+  tenant: Tenant;
+  snapshot: ConfigSnapshot;
+  onClose: () => void;
+}) {
+  const [restoreJobId, setRestoreJobId] = useState<string | null>(null);
+  const [mutErr, setMutErr] = useState<string | null>(null);
+
+  const diffQuery = useQuery({
+    queryKey: ["zpa-snapshot-diff", tenant.name, snapshot.id],
+    queryFn: () => fetchZpaSnapshotDiff(tenant.name, snapshot.id),
+    staleTime: 30_000,
+  });
+
+  const restoreMut = useMutation({
+    mutationFn: () => restoreZpaSnapshot(tenant.name, snapshot.id),
+    onSuccess: (data) => { setRestoreJobId(data.job_id); setMutErr(null); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const {
+    latestByPhase: restoreProgress,
+    jobStatus: restoreJobStatus,
+    result: restoreResult,
+    streamError: restoreStreamError,
+  } = useJobStream<ZpaRestoreResult>(restoreJobId);
+
+  const isRestoreRunning = restoreMut.isPending || restoreJobStatus === "running";
+  const restoreDone = restoreJobStatus === "done";
+  const diff = diffQuery.data;
+  const err = mutErr ?? restoreStreamError ?? null;
+
+  const ACTION_COLORS: Record<string, string> = {
+    create: "text-green-700 bg-green-50",
+    update: "text-blue-700 bg-blue-50",
+    delete: "text-red-700 bg-red-50",
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Restore ZPA Snapshot</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {snapshot.label || formatDateTime(snapshot.created_at)} · {snapshot.resource_count} resources
+            </p>
+          </div>
+          {!isRestoreRunning && (
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 ml-4">
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {err && <p className="text-xs text-red-600">{err}</p>}
+
+          {/* Restore result */}
+          {restoreDone && restoreResult && (
+            <div className="space-y-3">
+              <div className={`p-3 rounded-md text-sm ${restoreResult.failed > 0 ? "bg-amber-50 text-amber-800" : "bg-green-50 text-green-800"}`}>
+                <p className="font-medium">Restore complete</p>
+                <p className="text-xs mt-1">
+                  {restoreResult.applied} applied · {restoreResult.skipped} skipped
+                  {restoreResult.failed > 0 && ` · ${restoreResult.failed} failed`}
+                </p>
+              </div>
+              {restoreResult.items.filter(i => i.status === "manual").length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-amber-700 mb-1">Manual action required:</p>
+                  <div className="max-h-32 overflow-y-auto border border-amber-200 rounded-md divide-y divide-amber-100 text-xs">
+                    {restoreResult.items.filter(i => i.status === "manual").map((item, i) => (
+                      <div key={i} className="px-3 py-1.5 bg-white">
+                        <span className="font-mono text-gray-500">{item.resource_type}</span> · {item.name}
+                        <p className="text-amber-700 mt-0.5">{item.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {restoreResult.items.filter(i => i.status === "failed").length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-red-700 mb-1">Failed:</p>
+                  <div className="max-h-32 overflow-y-auto border border-red-200 rounded-md divide-y divide-red-100 text-xs">
+                    {restoreResult.items.filter(i => i.status === "failed").map((item, i) => (
+                      <div key={i} className="px-3 py-1.5 bg-white">
+                        <span className="font-mono text-gray-500">{item.resource_type}</span> · {item.name}
+                        <p className="text-red-700 font-mono break-all mt-0.5">{item.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <button onClick={onClose} className="text-xs text-zs-600 hover:underline">Close</button>
+            </div>
+          )}
+
+          {/* Restore running */}
+          {isRestoreRunning && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-gray-500">
+                {restoreProgress["restore"]
+                  ? `${(restoreProgress["restore"] as any).action ?? ""} ${restoreProgress["restore"].resource_type}: ${restoreProgress["restore"].name ?? ""} (${restoreProgress["restore"].done}/${restoreProgress["restore"].total})`
+                  : "Applying changes…"}
+              </p>
+              <ImportProgressBar active />
+            </div>
+          )}
+
+          {/* Diff preview + confirm */}
+          {!restoreDone && !isRestoreRunning && (
+            <>
+              {diffQuery.isLoading && <LoadingSpinner />}
+              {diffQuery.error && <ErrorMessage message={diffQuery.error instanceof Error ? diffQuery.error.message : "Failed to load diff"} />}
+              {diff && (
+                <div className="space-y-3">
+                  <div className="flex gap-4 text-xs">
+                    <span className="text-green-700 font-medium">{diff.creates} to create</span>
+                    <span className="text-blue-700 font-medium">{diff.updates} to update</span>
+                    <span className="text-red-700 font-medium">{diff.deletes} to delete</span>
+                  </div>
+
+                  {diff.creates + diff.updates + diff.deletes === 0 ? (
+                    <p className="text-sm text-gray-500">Current state already matches this snapshot.</p>
+                  ) : (
+                    <>
+                      <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100 text-xs">
+                        {diff.items.map((item, i) => (
+                          <div key={i} className="flex items-center justify-between px-3 py-1.5 bg-white">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className={`shrink-0 px-1.5 py-0.5 rounded text-xs font-medium ${ACTION_COLORS[item.action] ?? ""}`}>
+                                {item.action}
+                              </span>
+                              <span className="font-mono text-gray-400 shrink-0">{item.resource_type}</span>
+                              <span className="text-gray-700 truncate">{item.name}</span>
+                            </div>
+                            {!item.supported && (
+                              <span className="shrink-0 text-amber-600 ml-2">manual</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-400">
+                        Items marked "manual" (creates, complex config updates) must be applied outside the web UI.
+                        Only supported operations (enable/disable, delete) will be executed automatically.
+                      </p>
+                      <button
+                        onClick={() => restoreMut.mutate()}
+                        disabled={restoreMut.isPending}
+                        className="w-full px-3 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+                      >
+                        Apply Restore
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ZpaSnapshotsSection({ tenant, isOpen }: { tenant: Tenant; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [labelInput, setLabelInput] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<ConfigSnapshot | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zpa-snapshots", tenant.name],
+    queryFn: () => fetchSnapshots(tenant.name, "ZPA"),
+    enabled: isOpen,
+  });
+
+  const createMut = useMutation({
+    mutationFn: () => createSnapshot(tenant.name, labelInput.trim() || undefined, "ZPA"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zpa-snapshots", tenant.name] });
+      setLabelInput("");
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deleteSnapshot(tenant.name, id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zpa-snapshots", tenant.name] });
+      setDeleteTarget(null);
+    },
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+
+  const snaps = data ?? [];
+
+  return (
+    <div className="space-y-4">
+      {deleteTarget !== null && (
+        <ConfirmDialog
+          title="Delete Snapshot"
+          message="Delete this snapshot? This cannot be undone."
+          onConfirm={() => deleteMut.mutate(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+          destructive
+        />
+      )}
+
+      {restoreTarget && (
+        <ZpaRestoreModal
+          tenant={tenant}
+          snapshot={restoreTarget}
+          onClose={() => setRestoreTarget(null)}
+        />
+      )}
+
+      <div className="flex gap-2 items-end">
+        <div className="flex-1">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Label (optional)</label>
+          <input
+            type="text"
+            value={labelInput}
+            onChange={(e) => setLabelInput(e.target.value)}
+            placeholder="e.g. pre-change baseline"
+            className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+          />
+        </div>
+        <button
+          onClick={() => createMut.mutate()}
+          disabled={createMut.isPending}
+          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+        >
+          {createMut.isPending ? "Saving..." : "Save Snapshot"}
+        </button>
+      </div>
+      {createMut.isError && (
+        <ErrorMessage message={createMut.error instanceof Error ? createMut.error.message : "Failed to save"} />
+      )}
+
+      {snaps.length === 0 ? (
+        <p className="text-sm text-gray-400">No snapshots saved yet.</p>
+      ) : (
+        <div className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
+          {snaps.map((s: ConfigSnapshot) => (
+            <div key={s.id} className="flex items-center justify-between px-4 py-3 bg-white">
+              <div>
+                <p className="text-sm font-medium text-gray-900">{s.label || <span className="italic text-gray-400">Unlabeled</span>}</p>
+                <p className="text-xs text-gray-400">
+                  {formatDateTime(s.created_at)} · {s.resource_count} resources
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setRestoreTarget(s)}
+                  className="text-xs text-zs-600 hover:text-zs-800"
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={() => setDeleteTarget(s.id)}
+                  className="text-xs text-red-500 hover:text-red-700"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ZpaTab({ tenant }: { tenant: Tenant }) {
   const [groups, setGroups] = useState<Record<string, boolean>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -5249,6 +5538,13 @@ function ZpaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
         <Accordion title="PRA Consoles" isOpen={!!open.praConsoles} onToggle={() => toggle("praConsoles")}>
           <PraConsolesSection tenantName={tenant.name} isOpen={!!open.praConsoles} />
+        </Accordion>
+      </SectionGroup>
+
+      {/* Config Snapshots */}
+      <SectionGroup title="Config Snapshots" isOpen={!!groups.snapshots} onToggle={() => toggleGroup("snapshots")}>
+        <Accordion title="Snapshots" isOpen={!!open.snapshots} onToggle={() => toggle("snapshots")}>
+          <ZpaSnapshotsSection tenant={tenant} isOpen={!!open.snapshots} />
         </Accordion>
       </SectionGroup>
     </div>

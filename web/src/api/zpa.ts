@@ -362,3 +362,52 @@ export const listScimGroups = (tenant: string, q?: string): Promise<ZpaScimGroup
   apiFetch<ZpaScimGroup[]>(
     `${base(tenant)}/scim-groups${q ? `?q=${encodeURIComponent(q)}` : ""}`
   );
+
+// ── ZPA Snapshots ──────────────────────────────────────────────────────────────
+
+export interface ZpaSnapshotDiffItem {
+  action: "create" | "update" | "delete";
+  resource_type: string;
+  name: string;
+  id: string;
+  supported: boolean;
+  enabled_only?: boolean;
+}
+
+export interface ZpaSnapshotDiff {
+  snapshot_id: number;
+  snapshot_label?: string;
+  created_at?: string;
+  resource_count: number;
+  creates: number;
+  updates: number;
+  deletes: number;
+  items: ZpaSnapshotDiffItem[];
+}
+
+export interface ZpaRestoreResult {
+  applied: number;
+  skipped: number;
+  failed: number;
+  items: Array<{
+    action: string;
+    resource_type: string;
+    name: string;
+    status: "applied" | "skipped" | "failed" | "manual";
+    reason?: string;
+  }>;
+}
+
+export const fetchZpaSnapshotDiff = (
+  tenant: string,
+  snapshotId: number
+): Promise<ZpaSnapshotDiff> =>
+  apiFetch<ZpaSnapshotDiff>(`${base(tenant)}/snapshots/${snapshotId}/diff`);
+
+export const restoreZpaSnapshot = (
+  tenant: string,
+  snapshotId: number
+): Promise<{ job_id: string }> =>
+  apiFetch<{ job_id: string }>(`${base(tenant)}/snapshots/${snapshotId}/restore`, {
+    method: "POST",
+  });

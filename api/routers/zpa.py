@@ -430,6 +430,221 @@ def export_access_policy_csv(
 
 
 # ------------------------------------------------------------------
+# Config Snapshots (ZPA)
+# ------------------------------------------------------------------
+
+@router.get("/{tenant}/snapshots/{snapshot_id}/diff")
+def get_zpa_snapshot_diff(
+    tenant: str,
+    snapshot_id: int,
+    user: AuthUser = Depends(require_auth),
+):
+    """Return the diff between a ZPA snapshot and the current DB state."""
+    from db.database import get_session
+    from db.models import RestorePoint
+    from services.snapshot_service import compute_diff, get_snapshot_data_current
+
+    t = _get_db_context(tenant, user)
+
+    with get_session() as session:
+        snap = session.query(RestorePoint).filter_by(
+            id=snapshot_id, tenant_id=t.id, product="ZPA"
+        ).first()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        snap_resources = snap.snapshot["resources"]
+        snap_label = snap.comment
+        snap_created = snap.created_at.isoformat() if snap.created_at else None
+        snap_resource_count = snap.resource_count
+        current = get_snapshot_data_current(t.id, "ZPA", session)
+
+    diff = compute_diff(snap_resources, current)
+
+    # Map resource_type → supported ops (for UI hints)
+    _SUPPORTED = {
+        "application", "app_connector", "app_connector_group",
+        "service_edge", "pra_portal", "pra_console", "user_portal",
+    }
+
+    items = []
+    for rd in diff.resource_diffs:
+        rtype = rd.resource_type
+        supported = rtype in _SUPPORTED
+        # removed = in snapshot but not current → action: create
+        for item in rd.removed:
+            items.append({
+                "action": "create",
+                "resource_type": rtype,
+                "name": item.get("name") or item["id"],
+                "id": item["id"],
+                "supported": False,  # creates always manual — raw_config recreation not yet supported
+            })
+        # added = in current but not snapshot → action: delete
+        for item in rd.added:
+            items.append({
+                "action": "delete",
+                "resource_type": rtype,
+                "name": item.get("name") or item["id"],
+                "id": item["id"],
+                "supported": supported,
+            })
+        # modified = in both but different → action: update
+        for item in rd.modified:
+            field_names = {fc.field for fc in item["field_changes"]}
+            enabled_only = field_names == {"enabled"}
+            items.append({
+                "action": "update",
+                "resource_type": rtype,
+                "name": item.get("name") or item["id"],
+                "id": item["id"],
+                "enabled_only": enabled_only,
+                "supported": supported and enabled_only,
+            })
+
+    creates = sum(1 for i in items if i["action"] == "create")
+    updates = sum(1 for i in items if i["action"] == "update")
+    deletes = sum(1 for i in items if i["action"] == "delete")
+
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_label": snap_label,
+        "created_at": snap_created,
+        "resource_count": snap_resource_count,
+        "creates": creates,
+        "updates": updates,
+        "deletes": deletes,
+        "items": items,
+    }
+
+
+@router.post("/{tenant}/snapshots/{snapshot_id}/restore", status_code=202)
+def restore_zpa_snapshot(
+    tenant: str,
+    snapshot_id: int,
+    user: AuthUser = Depends(require_auth),
+):
+    """Apply a ZPA snapshot restore in the background. Returns a job_id."""
+    import threading
+    from api.jobs import store
+    from db.database import get_session
+    from db.models import RestorePoint
+    from services.snapshot_service import compute_diff, get_snapshot_data_current
+
+    svc = _get_service(tenant, user)
+
+    with get_session() as session:
+        snap = session.query(RestorePoint).filter_by(
+            id=snapshot_id, tenant_id=svc.tenant_id, product="ZPA"
+        ).first()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        snap_resources = snap.snapshot["resources"]
+        current = get_snapshot_data_current(svc.tenant_id, "ZPA", session)
+
+    diff = compute_diff(snap_resources, current)
+    job_id = store.create()
+
+    # Operations by resource type: (set_enabled_method, delete_method)
+    _OPS: Dict[str, Dict[str, str]] = {
+        "application":         {"set_enabled": "set_application_enabled",    "delete": "delete_application"},
+        "app_connector":       {"set_enabled": "set_connector_enabled",       "delete": "delete_connector"},
+        "app_connector_group": {"set_enabled": "set_connector_group_enabled", "delete": "delete_connector_group"},
+        "service_edge":        {"set_enabled": "set_service_edge_enabled"},
+        "pra_portal":          {"set_enabled": "set_pra_portal_enabled",      "delete": "delete_pra_portal"},
+        "pra_console":         {"set_enabled": "set_pra_console_enabled",     "delete": "delete_pra_console"},
+        "user_portal":         {"set_enabled": "set_user_portal_enabled",     "delete": "delete_user_portal"},
+    }
+
+    def run():
+        applied = 0
+        skipped = 0
+        failed = 0
+        result_items = []
+        total = sum(
+            len(rd.added) + len(rd.modified)
+            for rd in diff.resource_diffs
+        )
+        done = [0]
+
+        def emit(action: str, rtype: str, name: str, status: str, reason: str = ""):
+            done[0] += 1
+            store.append(job_id, {
+                "type": "progress", "phase": "restore",
+                "action": action, "resource_type": rtype,
+                "name": name, "done": done[0], "total": total,
+            })
+            result_items.append({
+                "action": action, "resource_type": rtype,
+                "name": name, "status": status, "reason": reason,
+            })
+
+        for rd in diff.resource_diffs:
+            rtype = rd.resource_type
+            ops = _OPS.get(rtype, {})
+
+            # Deletes: resources in current but not in snapshot
+            delete_fn_name = ops.get("delete")
+            for item in rd.added:
+                name = item.get("name") or item["id"]
+                rid = item["id"]
+                if delete_fn_name:
+                    try:
+                        getattr(svc, delete_fn_name)(rid, name)
+                        applied += 1
+                        emit("delete", rtype, name, "applied")
+                    except Exception as exc:
+                        failed += 1
+                        emit("delete", rtype, name, "failed", str(exc))
+                else:
+                    skipped += 1
+                    emit("delete", rtype, name, "skipped", "delete not supported for this resource type")
+
+            # Updates: resources in both but different config
+            set_enabled_name = ops.get("set_enabled")
+            for item in rd.modified:
+                name = item.get("name") or item["id"]
+                rid = item["id"]
+                field_names = {fc.field for fc in item["field_changes"]}
+                if "enabled" in field_names and set_enabled_name:
+                    # Find target enabled value from snapshot
+                    snap_item = next(
+                        (r for r in snap_resources.get(rtype, []) if r["id"] == rid), None
+                    )
+                    target_enabled = snap_item["raw_config"].get("enabled") if snap_item else None
+                    if target_enabled is not None:
+                        try:
+                            getattr(svc, set_enabled_name)(rid, bool(target_enabled))
+                            applied += 1
+                            emit("update", rtype, name, "applied")
+                        except Exception as exc:
+                            failed += 1
+                            emit("update", rtype, name, "failed", str(exc))
+                    else:
+                        skipped += 1
+                        emit("update", rtype, name, "skipped", "enabled value not found in snapshot")
+                    if field_names - {"enabled"}:
+                        # Additional non-enabled fields changed — note as manual
+                        result_items.append({
+                            "action": "update", "resource_type": rtype,
+                            "name": name, "status": "manual",
+                            "reason": f"config fields {sorted(field_names - {'enabled'})} require manual update",
+                        })
+                else:
+                    skipped += 1
+                    emit("update", rtype, name, "skipped", "only non-enabled config changes — manual update required")
+
+        store.complete(job_id, {
+            "applied": applied,
+            "skipped": skipped,
+            "failed": failed,
+            "items": result_items,
+        })
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+# ------------------------------------------------------------------
 # Identity (DB-first, read-only)
 # ------------------------------------------------------------------
 
