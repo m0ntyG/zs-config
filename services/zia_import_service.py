@@ -89,6 +89,8 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("vpn_credential", "list_vpn_credentials", id_field="id"),
     ResourceDef("gre_tunnel",     "list_gre_tunnels",     id_field="id"),
     ResourceDef("sublocation",    "list_sublocations",    id_field="id"),
+    # PAC Files — metadata only (pac_content excluded via filter=pac_content in list_pac_files).
+    ResourceDef("pac_file", "list_pac_files", id_field="id", name_field="name"),
 ]
 
 

@@ -1361,3 +1361,96 @@ class ZIAService:
             details={"count": len(result), "source": "api"},
         )
         return result
+
+    # ------------------------------------------------------------------
+    # PAC Files
+    # ------------------------------------------------------------------
+
+    def list_pac_files(self) -> List[Dict]:
+        rows = self._list_from_db("pac_file")
+        if rows:
+            audit_service.log(
+                product="ZIA", operation="list_pac_files", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="pac_file",
+                details={"count": len(rows), "source": "db"},
+            )
+            return rows
+        result = self.client.list_pac_files()
+        audit_service.log(
+            product="ZIA", operation="list_pac_files", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="pac_file",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def get_pac_file_versions(self, pac_id: int) -> List[Dict]:
+        result = self.client.get_pac_file_versions(pac_id)
+        audit_service.log(
+            product="ZIA", operation="get_pac_file_versions", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="pac_file",
+            resource_id=str(pac_id),
+            details={"version_count": len(result)},
+        )
+        return result
+
+    def validate_pac_file_content(self, pac_content: str) -> Dict:
+        """Returns the raw validation result dict; does not log (read-only utility call)."""
+        return self.client.validate_pac_file_content(pac_content)
+
+    def create_pac_file(self, config: Dict, auto_activate: bool = True) -> Dict:
+        """Create a new PAC file. config must include name, pac_content, etc.
+        pac_content is intentionally excluded from the audit entry.
+        """
+        result = self.client.create_pac_file(config)
+        audit_service.log(
+            product="ZIA",
+            operation="create_pac_file",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="pac_file",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["pac_file"])
+        return result
+
+    def update_pac_file_content(
+        self, pac_id: int, pac_version: int, config: Dict, auto_activate: bool = True
+    ) -> Dict:
+        """Push a new version of a PAC file.
+        pac_content is intentionally excluded from the audit entry.
+        """
+        result = self.client.update_pac_file_content(pac_id, pac_version, config)
+        audit_service.log(
+            product="ZIA",
+            operation="update_pac_file_content",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="pac_file",
+            resource_id=str(pac_id),
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["pac_file"])
+        return result
+
+    def delete_pac_file(self, pac_id: int, pac_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_pac_file(pac_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_pac_file",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="pac_file",
+            resource_id=str(pac_id),
+            resource_name=pac_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["pac_file"])

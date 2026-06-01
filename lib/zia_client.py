@@ -1492,3 +1492,83 @@ class ZIAClient:
 
     def delete_tenancy_restriction_profile(self, rule_id: str) -> None:
         self.zia_delete(f"{self._TENANCY_PATH}/{rule_id}")
+
+    # ------------------------------------------------------------------
+    # PAC Files
+    # ------------------------------------------------------------------
+
+    def list_pac_files(self) -> List[Dict]:
+        """List all PAC files without content (filter=pac_content omits the script body)."""
+        data = self.zia_get("/zia/api/v1/pacFiles?filter=pac_content")
+        return data if isinstance(data, list) else []
+
+    def get_pac_file_versions(self, pac_id: int) -> List[Dict]:
+        """Return all versions of a PAC file by ID."""
+        data = self.zia_get(f"/zia/api/v1/pacFiles/{pac_id}/version")
+        return data if isinstance(data, list) else []
+
+    def validate_pac_file_content(self, pac_content: str) -> Dict:
+        """POST raw PAC script for syntax validation.
+
+        Sends Content-Type: text/plain — the ZIA validate endpoint does not accept JSON.
+        Returns validation result dict with keys: success, message, severity,
+        warning_count, error_count, messages.
+        """
+        import requests as _req
+        import time
+        url = f"{self._oneapi_base_url}/zia/api/v1/pacFiles/validate"
+        max_attempts = 4
+        resp = None
+        for attempt in range(max_attempts):
+            token = self.auth.get_token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "text/plain",
+            }
+            resp = _req.post(url, data=pac_content.encode(), headers=headers, timeout=30)
+            if resp.status_code != 429 or attempt == max_attempts - 1:
+                break
+            try:
+                delay = float(resp.headers.get("Retry-After", ""))
+            except (ValueError, TypeError):
+                delay = 2 ** (attempt + 1)
+            time.sleep(delay)
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def create_pac_file(self, config: Dict) -> Dict:
+        """Create a new PAC file.
+
+        Uses direct HTTP (zia_post) to bypass the broken SDK add_pac_file method
+        which internally calls validate_pac_file with an incorrect keyword argument.
+        config must include: name, pac_content, pac_version_status,
+        pac_verification_status, pac_commit_message.
+        """
+        return self.zia_post("/zia/api/v1/pacFiles", config)
+
+    def update_pac_file_content(self, pac_id: int, pac_version: int, config: Dict) -> Dict:
+        """Push a new version of a PAC file (clone operation).
+
+        Uses direct HTTP to bypass the broken SDK clone_pac_file method.
+        Automatically handles the 10-version limit: if the PAC file already has
+        10 versions, appends ?deleteVersion=<oldest-non-LKG-version> to the URL.
+        Raises RuntimeError if all 10 versions are marked Last Known Good.
+        """
+        versions = self.get_pac_file_versions(pac_id)
+        path = f"/zia/api/v1/pacFiles/{pac_id}/version/{pac_version}"
+        if len(versions) >= 10:
+            candidates = sorted(
+                [v for v in versions if v.get("pac_version_status") != "LKG"],
+                key=lambda v: v.get("pac_version", 0),
+            )
+            if not candidates:
+                raise RuntimeError(
+                    "PAC file has 10 versions and all are marked Last Known Good. "
+                    "Remove an LKG designation in the ZIA portal before adding a new version."
+                )
+            path += f"?deleteVersion={candidates[0]['pac_version']}"
+        return self.zia_post(path, config)
+
+    def delete_pac_file(self, pac_id: int) -> None:
+        """Delete a PAC file and all its versions."""
+        self.zia_delete(f"/zia/api/v1/pacFiles/{pac_id}")

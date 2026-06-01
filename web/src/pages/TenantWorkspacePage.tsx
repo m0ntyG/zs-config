@@ -60,6 +60,12 @@ import {
   fetchSnapshots,
   createSnapshot,
   deleteSnapshot,
+  fetchPacFiles,
+  fetchPacFileVersions,
+  validatePacFileContent,
+  createPacFile,
+  updatePacFile,
+  deletePacFile,
   UrlCategory,
   UrlCategoryDetail,
   UrlFilteringRule,
@@ -79,6 +85,10 @@ import {
   CloudAppControlRule,
   TenancyRestrictionProfile,
   ConfigSnapshot,
+  PacFile,
+  PacFileVersion,
+  PacFileCreatePayload,
+  PacFileUpdatePayload,
 } from "../api/zia";
 import {
   fetchCertificates,
@@ -2025,6 +2035,440 @@ function TenancyRestrictionsSection({ tenantName, isOpen }: { tenantName: string
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── PAC Files ─────────────────────────────────────────────────────────────────
+
+function PacFileModal({
+  tenantName,
+  pac,
+  onClose,
+  onSaved,
+}: {
+  tenantName: string;
+  pac: PacFile | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isCreate = pac === null;
+  const [name, setName] = useState(pac?.name ?? "");
+  const [description, setDescription] = useState(pac?.description ?? "");
+  const [domain, setDomain] = useState(pac?.domain ?? "");
+  const [pacContent, setPacContent] = useState("");
+  const [commitMessage, setCommitMessage] = useState(isCreate ? "Initial version" : "");
+  const [verifyStatus, setVerifyStatus] = useState("VERIFY_NOERR");
+  const [validation, setValidation] = useState<{ success: boolean; message?: string; errorCount?: number } | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [mutErr, setMutErr] = useState<string | null>(null);
+
+  // Fetch versions to pre-fill content for edit mode
+  const versionsQuery = useQuery({
+    queryKey: ["zia-pac-file-versions", tenantName, pac?.id],
+    queryFn: () => fetchPacFileVersions(tenantName, pac!.id),
+    enabled: !isCreate && pac !== null,
+  });
+
+  // Pre-fill PAC content from deployed version
+  const deployedContent = (() => {
+    const versions: PacFileVersion[] = versionsQuery.data ?? [];
+    const deployed = versions.find((v) => v.pacVersionStatus === "DEPLOYED") ?? versions[0];
+    return deployed?.pacContent ?? "";
+  })();
+  const [contentPrefilled, setContentPrefilled] = useState(false);
+  if (!isCreate && deployedContent && !contentPrefilled) {
+    setPacContent(deployedContent);
+    setContentPrefilled(true);
+  }
+
+  const createMut = useMutation({
+    mutationFn: (payload: PacFileCreatePayload) => createPacFile(tenantName, payload),
+    onSuccess: () => { onSaved(); onClose(); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const updateMut = useMutation({
+    mutationFn: (payload: PacFileUpdatePayload) => updatePacFile(tenantName, pac!.id, payload),
+    onSuccess: () => { onSaved(); onClose(); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const isPending = createMut.isPending || updateMut.isPending;
+
+  async function handleValidate() {
+    if (!pacContent.trim()) return;
+    setValidating(true);
+    setValidation(null);
+    try {
+      const result = await validatePacFileContent(tenantName, pacContent);
+      setValidation(result);
+      setVerifyStatus(result.success ? "VERIFY_NOERR" : "NOVERIFY");
+    } catch {
+      setValidation({ success: false, message: "Validation request failed" });
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  function handleSubmit() {
+    if (!name.trim() || !pacContent.trim() || !commitMessage.trim()) return;
+    setMutErr(null);
+    if (isCreate) {
+      const payload: PacFileCreatePayload = {
+        name: name.trim(),
+        pac_content: pacContent,
+        pac_commit_message: commitMessage.trim(),
+        pac_verification_status: verifyStatus,
+        pac_version_status: "DEPLOYED",
+      };
+      if (description.trim()) payload.description = description.trim();
+      if (domain.trim()) payload.domain = domain.trim();
+      createMut.mutate(payload);
+    } else {
+      const payload: PacFileUpdatePayload = {
+        name: name.trim(),
+        pac_content: pacContent,
+        pac_commit_message: commitMessage.trim(),
+        pac_verification_status: verifyStatus,
+        pac_version_status: "DEPLOYED",
+      };
+      if (description.trim()) payload.description = description.trim();
+      updateMut.mutate(payload);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
+          <h2 className="text-base font-semibold text-gray-900">
+            {isCreate ? "Add PAC File" : `Edit PAC File: ${pac?.name}`}
+          </h2>
+          <button onClick={onClose} disabled={isPending} className="text-gray-400 hover:text-gray-600 ml-4">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {mutErr && (
+            <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{mutErr}</div>
+          )}
+
+          {/* Version history (edit mode) */}
+          {!isCreate && versionsQuery.data && versionsQuery.data.length > 0 && (
+            <details className="border border-gray-200 rounded-md">
+              <summary className="px-3 py-2 text-xs font-medium text-gray-600 cursor-pointer hover:bg-gray-50">
+                Version History ({versionsQuery.data.length})
+              </summary>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Version</th>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Status</th>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Commit Message</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {versionsQuery.data.map((v: PacFileVersion) => (
+                      <tr key={v.pacVersion}>
+                        <td className="px-3 py-1.5 font-mono text-gray-500">{v.pacVersion}</td>
+                        <td className="px-3 py-1.5 text-gray-700">{v.pacVersionStatus}</td>
+                        <td className="px-3 py-1.5 text-gray-500">{v.pacCommitMessage ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* Deployed content (collapsed by default — can be large) */}
+              {(() => {
+                const deployed = versionsQuery.data.find((v: PacFileVersion) => v.pacVersionStatus === "DEPLOYED");
+                return deployed?.pacContent ? (
+                  <details className="border-t border-gray-200">
+                    <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:bg-gray-50">
+                      View deployed PAC content
+                    </summary>
+                    <pre className="px-3 py-2 text-xs text-gray-700 bg-gray-50 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">
+                      {deployed.pacContent}
+                    </pre>
+                  </details>
+                ) : null;
+              })()}
+            </details>
+          )}
+
+          {/* Form fields */}
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={isPending}
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                disabled={isPending}
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            {isCreate && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Domain</label>
+                <input
+                  type="text"
+                  value={domain}
+                  onChange={(e) => setDomain(e.target.value)}
+                  disabled={isPending}
+                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+                />
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Commit Message <span className="text-red-500">*</span></label>
+              <input
+                type="text"
+                value={commitMessage}
+                onChange={(e) => setCommitMessage(e.target.value)}
+                disabled={isPending}
+                placeholder="Describe this version..."
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Verification Status</label>
+              <select
+                value={verifyStatus}
+                onChange={(e) => setVerifyStatus(e.target.value)}
+                disabled={isPending}
+                className="border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              >
+                <option value="VERIFY_NOERR">Verify (no errors)</option>
+                <option value="NOVERIFY">Skip verification</option>
+                <option value="VERIFY_ERR">Verify (allow errors)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">PAC Content <span className="text-red-500">*</span></label>
+              <textarea
+                value={pacContent}
+                onChange={(e) => { setPacContent(e.target.value); setValidation(null); }}
+                disabled={isPending}
+                rows={12}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+                placeholder="function FindProxyForURL(url, host) { ... }"
+              />
+              <div className="mt-1 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleValidate}
+                  disabled={validating || isPending || !pacContent.trim()}
+                  className="px-3 py-1 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  {validating ? "Validating..." : "Validate"}
+                </button>
+                {validation !== null && (
+                  <span className={`text-xs ${validation.success ? "text-green-600" : "text-red-600"}`}>
+                    {validation.success
+                      ? "Valid"
+                      : `${validation.errorCount ?? 0} error(s)${validation.message ? `: ${validation.message}` : ""}`}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-4 border-t border-gray-200 flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            disabled={isPending}
+            className="px-4 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={isPending || !name.trim() || !pacContent.trim() || !commitMessage.trim()}
+            className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+          >
+            {isPending ? "Saving..." : isCreate ? "Create" : "Push New Version"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PacFileRow({
+  tenantName,
+  pac,
+  onEdit,
+  onDeleted,
+}: {
+  tenantName: string;
+  pac: PacFile;
+  onEdit: (p: PacFile) => void;
+  onDeleted: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  const deleteMut = useMutation({
+    mutationFn: () => deletePacFile(tenantName, pac.id),
+    onSuccess: () => onDeleted(),
+    onError: (e: Error) => setDeleteErr(e.message),
+  });
+
+  const isReadOnly = pac.editable === false;
+
+  return (
+    <>
+      <tr className="hover:bg-gray-50 cursor-pointer" onClick={() => setExpanded((e) => !e)}>
+        <td className="px-3 py-2 font-mono text-xs text-gray-500">{pac.id}</td>
+        <td className="px-3 py-2 text-gray-900">{pac.name}</td>
+        <td className="px-3 py-2 text-gray-500">{pac.description ?? "-"}</td>
+        <td className="px-3 py-2 text-gray-500">{pac.domain ?? "-"}</td>
+        <td className="px-3 py-2 text-xs text-gray-400 font-mono break-all">{(pac as unknown as Record<string, unknown>)["pac_url"] as string ?? "-"}</td>
+        <td className="px-3 py-2 text-xs text-gray-400">
+          {pac.lastModifiedTime ? new Date(pac.lastModifiedTime * 1000).toLocaleDateString() : "-"}
+        </td>
+        <td className="px-3 py-2">
+          <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => onEdit(pac)}
+              disabled={isReadOnly || deleteMut.isPending}
+              title={isReadOnly ? "Read-only (Zscaler-managed)" : "Edit"}
+              className="px-2 py-1 text-xs rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Edit
+            </button>
+            <button
+              onClick={() => setConfirmDelete(true)}
+              disabled={isReadOnly || deleteMut.isPending}
+              title={isReadOnly ? "Read-only (Zscaler-managed)" : "Delete"}
+              className="px-2 py-1 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-40"
+            >
+              Delete
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={7} className="px-3 py-2 bg-gray-50">
+            {deleteErr && (
+              <div className="mb-2 text-xs text-red-600">{deleteErr}</div>
+            )}
+            {isReadOnly && (
+              <div className="text-xs text-amber-600 italic">This PAC file is read-only (Zscaler-managed).</div>
+            )}
+          </td>
+        </tr>
+      )}
+      {confirmDelete && (
+        <tr>
+          <td colSpan={7} className="px-3 py-2 bg-red-50">
+            <div className="flex items-center gap-3 text-sm text-red-700">
+              <span>Delete &ldquo;{pac.name}&rdquo; and all its versions?</span>
+              <button
+                onClick={() => { setDeleteErr(null); deleteMut.mutate(); setConfirmDelete(false); }}
+                disabled={deleteMut.isPending}
+                className="px-3 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {deleteMut.isPending ? "Deleting..." : "Confirm Delete"}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="px-3 py-1 text-xs rounded border border-gray-300 text-gray-700 hover:bg-white"
+              >
+                Cancel
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function PacFilesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [modalPac, setModalPac] = useState<PacFile | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-pac-files", tenantName],
+    queryFn: () => fetchPacFiles(tenantName),
+    enabled: isOpen,
+  });
+
+  function openCreate() { setModalPac(null); setModalOpen(true); }
+  function openEdit(p: PacFile) { setModalPac(p); setModalOpen(true); }
+  function closeModal() { setModalOpen(false); }
+  function onSaved() { qc.invalidateQueries({ queryKey: ["zia-pac-files", tenantName] }); }
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <button
+          onClick={openCreate}
+          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+        >
+          + Add PAC File
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">PAC URL</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last Modified</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {(data ?? []).map((p: PacFile) => (
+              <PacFileRow
+                key={p.id}
+                tenantName={tenantName}
+                pac={p}
+                onEdit={openEdit}
+                onDeleted={() => qc.invalidateQueries({ queryKey: ["zia-pac-files", tenantName] })}
+              />
+            ))}
+            {(data ?? []).length === 0 && (
+              <tr><td colSpan={7} className="px-3 py-4 text-center text-gray-400">No PAC files</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {modalOpen && (
+        <PacFileModal
+          tenantName={tenantName}
+          pac={modalPac}
+          onClose={closeModal}
+          onSaved={onSaved}
+        />
+      )}
     </div>
   );
 }
@@ -5111,6 +5555,9 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
         <Accordion title="Tenancy Restrictions" isOpen={!!open.tenancyRestrictions} onToggle={() => toggle("tenancyRestrictions")}>
           <TenancyRestrictionsSection tenantName={tenant.name} isOpen={!!open.tenancyRestrictions} />
+        </Accordion>
+        <Accordion title="PAC Files" isOpen={!!open.pacFiles} onToggle={() => toggle("pacFiles")}>
+          <PacFilesSection tenantName={tenant.name} isOpen={!!open.pacFiles} />
         </Accordion>
         <Accordion title="Cloud App Rules" isOpen={!!open.cloudAppRules} onToggle={() => toggle("cloudAppRules")}>
           <CloudAppRulesSection tenantName={tenant.name} isOpen={!!open.cloudAppRules} />
