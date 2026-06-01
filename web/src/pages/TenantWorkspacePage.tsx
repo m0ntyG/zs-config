@@ -60,6 +60,14 @@ import {
   fetchSnapshots,
   createSnapshot,
   deleteSnapshot,
+  fetchPacFiles,
+  fetchPacFileVersions,
+  validatePacFileContent,
+  createPacFile,
+  updatePacFile,
+  deletePacFile,
+  fetchOrgDomains,
+  fetchSubClouds,
   UrlCategory,
   UrlCategoryDetail,
   UrlFilteringRule,
@@ -79,6 +87,10 @@ import {
   CloudAppControlRule,
   TenancyRestrictionProfile,
   ConfigSnapshot,
+  PacFile,
+  PacFileVersion,
+  PacFileCreatePayload,
+  PacFileUpdatePayload,
 } from "../api/zia";
 import {
   fetchCertificates,
@@ -2025,6 +2037,966 @@ function TenancyRestrictionsSection({ tenantName, isOpen }: { tenantName: string
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── PAC Files ─────────────────────────────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// PAC builder helpers
+// ---------------------------------------------------------------------------
+
+interface GatewayConfig {
+  varType: "GATEWAY" | "GATEWAY_HOST" | "custom";
+  customAddress: string;
+  lbMode: "none" | "index" | "dynamic";
+  lbIndex: number;             // 0–7, used when lbMode === "index"
+  port: string;                // e.g. "9400" or "${ZS_CUSTOM_PORT}"
+  useSubcloud: boolean;
+  subcloudName: string;        // e.g. "myorg"
+  subcloudCloud: string;       // e.g. "zscaler" — ".net" is always appended
+  includeSecondary: boolean;
+  fallbackDirect: boolean;
+}
+
+interface PacBuilderConfig {
+  gateway: GatewayConfig;
+  bypassPlainHostnames: boolean;
+  bypassLocalhost: boolean;
+  directSubnets: string[];   // CIDR, e.g. "10.0.0.0/8"
+  directDomains: string[];   // e.g. ".corp.com", "*.internal", "host.local"
+  defaultAction: "PROXY" | "DIRECT";
+}
+
+// Produces e.g. ".myorg.zscaler.net" — always appends ".net" per Zscaler spec.
+function subcloudSuffix(gw: GatewayConfig): string {
+  return gw.useSubcloud && gw.subcloudName && gw.subcloudCloud
+    ? `.${gw.subcloudName}.${gw.subcloudCloud}.net` : "";
+}
+
+function buildGatewayVar(gw: GatewayConfig): string {
+  if (gw.varType === "custom") return gw.customAddress || "gateway.zscaler.net";
+  const sub = subcloudSuffix(gw);
+  const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
+  const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
+  return `\${GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
+}
+
+function buildSecondaryVar(gw: GatewayConfig): string {
+  const sub = subcloudSuffix(gw);
+  // Standard (no subcloud): SECONDARY_GATEWAY; subcloud: SECONDARY.GATEWAY per Zscaler docs.
+  const sep = sub ? "." : "_";
+  const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
+  const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
+  return `\${SECONDARY${sep}GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
+}
+
+function cidrToNetMask(cidr: string): [string, string] | null {
+  const parts = cidr.trim().split("/");
+  if (parts.length !== 2) return null;
+  const prefix = parseInt(parts[1], 10);
+  if (isNaN(prefix) || prefix < 0 || prefix > 32) return null;
+  const bits = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const mask = [(bits >>> 24) & 255, (bits >>> 16) & 255, (bits >>> 8) & 255, bits & 255].join(".");
+  return [parts[0], mask];
+}
+
+function generatePac(cfg: PacBuilderConfig): string {
+  const lines: string[] = ["function FindProxyForURL(url, host) {"];
+
+  if (cfg.bypassPlainHostnames)
+    lines.push('  if (isPlainHostName(host)) return "DIRECT";');
+
+  if (cfg.bypassLocalhost)
+    lines.push('  if (host === "localhost" || host === "127.0.0.1") return "DIRECT";');
+
+  const validSubnets = cfg.directSubnets
+    .map((s) => cidrToNetMask(s.trim()))
+    .filter((r): r is [string, string] => r !== null);
+
+  if (validSubnets.length > 0) {
+    lines.push("  var ipAddr = dnsResolve(host);");
+    lines.push("  if (ipAddr) {");
+    for (const [net, mask] of validSubnets)
+      lines.push(`    if (isInNet(ipAddr, "${net}", "${mask}")) return "DIRECT";`);
+    lines.push("  }");
+  }
+
+  for (const raw of cfg.directDomains) {
+    const p = raw.trim();
+    if (!p) continue;
+    if (p.startsWith("."))
+      lines.push(`  if (dnsDomainIs(host, "${p}")) return "DIRECT";`);
+    else if (p.includes("*") || p.includes("?"))
+      lines.push(`  if (shExpMatch(host, "${p}")) return "DIRECT";`);
+    else
+      lines.push(`  if (host === "${p}" || dnsDomainIs(host, ".${p}")) return "DIRECT";`);
+  }
+
+  if (cfg.defaultAction === "PROXY") {
+    const gw = cfg.gateway;
+    const primary = buildGatewayVar(gw);
+    let ret = `PROXY ${primary}:${gw.port || "9400"}`;
+    if (gw.includeSecondary && gw.varType !== "custom") {
+      const secondary = buildSecondaryVar(gw);
+      ret += `; PROXY ${secondary}:${gw.port || "9400"}`;
+    }
+    if (gw.fallbackDirect) ret += "; DIRECT";
+    lines.push(`  return "${ret}";`);
+  } else {
+    lines.push('  return "DIRECT";');
+  }
+
+  lines.push("}");
+  return lines.join("\n");
+}
+
+function maskToCidr(net: string, mask: string): string {
+  const parts = mask.split(".").map(Number);
+  const n = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  let prefix = 0;
+  let b = n;
+  while (b & 0x80000000) { prefix++; b = (b << 1) >>> 0; }
+  return `${net}/${prefix}`;
+}
+
+function defaultGatewayConfig(): GatewayConfig {
+  return {
+    varType: "GATEWAY", customAddress: "", lbMode: "none", lbIndex: 0,
+    port: "9400", useSubcloud: false, subcloudName: "", subcloudCloud: "zscaler",
+    includeSecondary: true, fallbackDirect: true,
+  };
+}
+
+function parsePac(content: string): PacBuilderConfig {
+  const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
+  const bypassPlainHostnames = lines.some(l => l.includes("isPlainHostName(host)"));
+  const bypassLocalhost = lines.some(l => l.includes('host === "localhost"'));
+
+  const directSubnets: string[] = [];
+  const directDomains: string[] = [];
+
+  for (const line of lines) {
+    const subnetM = line.match(/isInNet\(ipAddr,\s*"([^"]+)",\s*"([^"]+)"\)/);
+    if (subnetM) { directSubnets.push(maskToCidr(subnetM[1], subnetM[2])); continue; }
+
+    // .domain → dnsDomainIs (no host === prefix)
+    const dotM = line.match(/^if \(dnsDomainIs\(host, "(\.[^"]+)"\)\) return "DIRECT";$/);
+    if (dotM) { directDomains.push(dotM[1]); continue; }
+
+    // wildcard → shExpMatch
+    const wcM = line.match(/^if \(shExpMatch\(host, "([^"]+)"\)\) return "DIRECT";$/);
+    if (wcM) { directDomains.push(wcM[1]); continue; }
+
+    // exact domain → host === "x" || dnsDomainIs
+    const exactM = line.match(/^if \(host === "([^"]+)" \|\| dnsDomainIs/);
+    if (exactM) { directDomains.push(exactM[1]); continue; }
+  }
+
+  const returnLine = lines.find(l => /^return "/.test(l));
+  if (!returnLine || !returnLine.includes("PROXY")) {
+    return { gateway: defaultGatewayConfig(), bypassPlainHostnames, bypassLocalhost, directSubnets, directDomains, defaultAction: "DIRECT" };
+  }
+
+  const proxyStr = returnLine.match(/^return "([^"]+)";$/)?.[1] ?? "";
+  const tokens = proxyStr.split(";").map(t => t.trim());
+  const primaryTok = tokens.find(t => t.startsWith("PROXY") && !t.includes("SECONDARY"));
+  const fallbackDirect = tokens.includes("DIRECT");
+  const includeSecondary = tokens.some(t => t.includes("SECONDARY"));
+
+  const gw = defaultGatewayConfig();
+  gw.fallbackDirect = fallbackDirect;
+  gw.includeSecondary = includeSecondary;
+
+  if (primaryTok) {
+    const addrFull = primaryTok.replace(/^PROXY\s+/, "");
+    const colonIdx = addrFull.lastIndexOf(":");
+    const hostPart = colonIdx > -1 ? addrFull.slice(0, colonIdx) : addrFull;
+    gw.port = colonIdx > -1 ? addrFull.slice(colonIdx + 1) : "9400";
+
+    if (hostPart.startsWith("${") && hostPart.endsWith("}")) {
+      const inner = hostPart.slice(2, -1);
+      // Subcloud: GATEWAY.name.cloud.net or GATEWAY.name.cloud.net_FX / _F0
+      const subM = inner.match(/^GATEWAY\.([^.]+)\.([^.]+)\.net(_FX|_F[0-7])?$/);
+      if (subM) {
+        gw.useSubcloud = true;
+        gw.subcloudName = subM[1];
+        gw.subcloudCloud = subM[2];
+        if (subM[3] === "_FX") { gw.lbMode = "dynamic"; }
+        else if (subM[3]) { gw.lbMode = "index"; gw.lbIndex = parseInt(subM[3][2]); }
+      } else {
+        // Strip lb suffix first, then check for _HOST
+        const lbM = inner.match(/(_FX|_F[0-7])$/);
+        const base = lbM ? inner.slice(0, -lbM[0].length) : inner;
+        gw.varType = base === "GATEWAY_HOST" ? "GATEWAY_HOST" : "GATEWAY";
+        if (lbM?.[0] === "_FX") { gw.lbMode = "dynamic"; }
+        else if (lbM) { gw.lbMode = "index"; gw.lbIndex = parseInt(lbM[0][2]); }
+      }
+    } else {
+      gw.varType = "custom";
+      gw.customAddress = hostPart;
+    }
+  }
+
+  return { gateway: gw, bypassPlainHostnames, bypassLocalhost, directSubnets, directDomains, defaultAction: "PROXY" };
+}
+
+function TagInput({
+  label, placeholder, items, onChange, disabled, hint,
+}: {
+  label: string; placeholder: string; items: string[];
+  onChange: (items: string[]) => void; disabled?: boolean; hint?: string;
+}) {
+  const [input, setInput] = useState("");
+  function add() {
+    const v = input.trim();
+    if (v && !items.includes(v)) onChange([...items, v]);
+    setInput("");
+  }
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
+      {hint && <p className="text-xs text-gray-500 mb-1">{hint}</p>}
+      <div className="flex gap-2 mb-1.5">
+        <input
+          type="text" value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+          placeholder={placeholder} disabled={disabled}
+          className="flex-1 border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+        />
+        <button
+          type="button" onClick={add}
+          disabled={disabled || !input.trim()}
+          className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >Add</button>
+      </div>
+      {items.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {items.map((item) => (
+            <span key={item} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+              {item}
+              <button
+                type="button" disabled={disabled}
+                onClick={() => onChange(items.filter((i) => i !== item))}
+                className="text-blue-400 hover:text-blue-600 disabled:opacity-60 leading-none"
+              >×</button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PacFileModal
+// ---------------------------------------------------------------------------
+
+function PacFileModal({
+  tenantName,
+  pac,
+  onClose,
+  onSaved,
+}: {
+  tenantName: string;
+  pac: PacFile | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isCreate = pac === null;
+
+  // Metadata fields
+  const [name, setName] = useState(pac?.name ?? "");
+  const [description, setDescription] = useState(pac?.description ?? "");
+  const [commitMessage, setCommitMessage] = useState("");
+  const [domain, setDomain] = useState(pac?.domain ?? "");
+
+  // PAC builder state
+  const [builder, setBuilder] = useState<PacBuilderConfig>({
+    gateway: defaultGatewayConfig(),
+    bypassPlainHostnames: true,
+    bypassLocalhost: true,
+    directSubnets: [],
+    directDomains: [],
+    defaultAction: "PROXY",
+  });
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Validation
+  const [validation, setValidation] = useState<{ success: boolean; message?: string; errorCount?: number } | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [mutErr, setMutErr] = useState<string | null>(null);
+
+  function patchBuilder(patch: Partial<PacBuilderConfig>) {
+    setBuilder((b) => ({ ...b, ...patch }));
+    setValidation(null);
+  }
+
+  function patchGateway(patch: Partial<GatewayConfig>) {
+    setBuilder((b) => ({ ...b, gateway: { ...b.gateway, ...patch } }));
+    setValidation(null);
+  }
+
+  const generatedPac = generatePac(builder);
+
+  // Org domains dropdown
+  const domainsQuery = useQuery({
+    queryKey: ["zia-org-domains", tenantName],
+    queryFn: () => fetchOrgDomains(tenantName),
+    staleTime: 5 * 60 * 1000,
+  });
+  const orgDomains: string[] = domainsQuery.data ?? [];
+
+  // Subclouds dropdown + auto-fill cloud name from zia_cloud
+  const subCloudsQuery = useQuery({
+    queryKey: ["zia-sub-clouds", tenantName],
+    queryFn: () => fetchSubClouds(tenantName),
+    staleTime: 5 * 60 * 1000,
+  });
+  const subClouds = subCloudsQuery.data?.subclouds ?? [];
+  useEffect(() => {
+    if (subCloudsQuery.data?.zia_cloud) {
+      const cloud = subCloudsQuery.data.zia_cloud.replace(/\.net$/i, "");
+      patchGateway({ subcloudCloud: cloud });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subCloudsQuery.data?.zia_cloud]);
+
+  // Version history (edit mode)
+  const versionsQuery = useQuery({
+    queryKey: ["zia-pac-file-versions", tenantName, pac?.id],
+    queryFn: () => fetchPacFileVersions(tenantName, pac!.id),
+    enabled: !isCreate,
+  });
+  useEffect(() => {
+    if (isCreate || !versionsQuery.data) return;
+    const deployed = versionsQuery.data.find((v: PacFileVersion) => v.pacVersionStatus === "DEPLOYED");
+    if (!deployed?.pacContent) return;
+    setBuilder(parsePac(deployed.pacContent));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [versionsQuery.data]);
+
+  const createMut = useMutation({
+    mutationFn: (payload: PacFileCreatePayload) => createPacFile(tenantName, payload),
+    onSuccess: () => { onSaved(); onClose(); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+  const updateMut = useMutation({
+    mutationFn: (payload: PacFileUpdatePayload) => updatePacFile(tenantName, pac!.id, payload),
+    onSuccess: () => { onSaved(); onClose(); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+  const isPending = createMut.isPending || updateMut.isPending;
+
+  async function handleValidate() {
+    setValidating(true);
+    setValidation(null);
+    try {
+      const result = await validatePacFileContent(tenantName, generatedPac);
+      setValidation(result);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Validation request failed";
+      setValidation({ success: false, message: msg });
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  function handleSubmit() {
+    if (!name.trim() || !description.trim() || !commitMessage.trim()) return;
+    setMutErr(null);
+    const verifyStatus = validation?.success ? "VERIFY_NOERR" : "NOVERIFY";
+    if (isCreate) {
+      const payload: PacFileCreatePayload = {
+        name: name.trim(),
+        description: description.trim(),
+        pac_commit_message: commitMessage.trim(),
+        pac_content: generatedPac,
+        pac_verification_status: verifyStatus,
+        pac_version_status: "DEPLOYED",
+      };
+      if (domain) payload.domain = domain;
+      createMut.mutate(payload);
+    } else {
+      updateMut.mutate({
+        name: name.trim(),
+        description: description.trim(),
+        pac_commit_message: commitMessage.trim(),
+        pac_content: generatedPac,
+        pac_verification_status: verifyStatus,
+        pac_version_status: "DEPLOYED",
+      });
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
+          <h2 className="text-base font-semibold text-gray-900">
+            {isCreate ? "Add PAC File" : `Edit PAC File: ${pac?.name}`}
+          </h2>
+          <button onClick={onClose} disabled={isPending} className="text-gray-400 hover:text-gray-600 ml-4">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {mutErr && <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{mutErr}</div>}
+
+          {/* Version history (edit mode) */}
+          {!isCreate && versionsQuery.data && versionsQuery.data.length > 0 && (
+            <details className="border border-gray-200 rounded-md">
+              <summary className="px-3 py-2 text-xs font-medium text-gray-600 cursor-pointer hover:bg-gray-50">
+                Version History ({versionsQuery.data.length})
+              </summary>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Ver</th>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {versionsQuery.data.map((v: PacFileVersion) => (
+                      <tr key={v.pacVersion}>
+                        <td className="px-3 py-1.5 font-mono text-gray-500">{v.pacVersion}</td>
+                        <td className="px-3 py-1.5 text-gray-700">{v.pacVersionStatus}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {(() => {
+                const deployed = versionsQuery.data.find((v: PacFileVersion) => v.pacVersionStatus === "DEPLOYED");
+                return deployed?.pacContent ? (
+                  <details className="border-t border-gray-200">
+                    <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:bg-gray-50">
+                      View current deployed content
+                    </summary>
+                    <pre className="px-3 py-2 text-xs text-gray-700 bg-gray-50 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
+                      {deployed.pacContent}
+                    </pre>
+                  </details>
+                ) : null;
+              })()}
+            </details>
+          )}
+
+          {/* ── Metadata ── */}
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text" value={name} onChange={(e) => setName(e.target.value)}
+                disabled={isPending}
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Description <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text" value={description} onChange={(e) => setDescription(e.target.value)}
+                disabled={isPending}
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Commit message <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text" value={commitMessage} onChange={(e) => setCommitMessage(e.target.value)}
+                placeholder="e.g. Initial version"
+                disabled={isPending}
+                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+            </div>
+            {isCreate && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Domain</label>
+                <select
+                  value={domain} onChange={(e) => setDomain(e.target.value)}
+                  disabled={isPending || domainsQuery.isLoading}
+                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60 bg-white"
+                >
+                  <option value="">— None —</option>
+                  {orgDomains.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Proxy server ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-3">Proxy Configuration</h3>
+            <fieldset disabled={isPending || builder.defaultAction === "DIRECT"} className="space-y-3 disabled:opacity-40">
+              {/* Gateway variable type */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Gateway address</label>
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    ["GATEWAY", "${GATEWAY} — auto-resolved IP (recommended)"],
+                    ["GATEWAY_HOST", "${GATEWAY_HOST} — hostname, required for Kerberos / IPv6"],
+                    ["custom", "Custom hostname or IP"],
+                  ] as const).map(([val, label]) => (
+                    <label key={val} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                      <input
+                        type="radio" name="gatewayType" value={val}
+                        checked={builder.gateway.varType === val}
+                        onChange={() => patchGateway({ varType: val })}
+                      />
+                      <span className="font-mono text-xs text-gray-600">{label}</span>
+                    </label>
+                  ))}
+                </div>
+                {builder.gateway.varType === "custom" && (
+                  <input
+                    type="text"
+                    value={builder.gateway.customAddress}
+                    onChange={(e) => patchGateway({ customAddress: e.target.value })}
+                    placeholder="proxy.example.com"
+                    className="mt-2 w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                  />
+                )}
+              </div>
+
+              {/* Port */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={builder.gateway.port}
+                    onChange={(e) => patchGateway({ port: e.target.value })}
+                    className="w-28 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                    placeholder="9400"
+                  />
+                  <span className="text-xs text-gray-400">Common: 80 · 443 · 9400 · 9443 · 9480</span>
+                </div>
+              </div>
+
+              {/* Load balancing — only for Zscaler variables */}
+              {builder.gateway.varType !== "custom" && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Load balancing</label>
+                  <div className="flex flex-col gap-1.5">
+                    {([
+                      ["none", "None — single gateway IP"],
+                      ["index", "Index (F0–F7) — distribute across up to 8 VIPs"],
+                      ["dynamic", "Dynamic (FX) — per-client fingerprint (ZCC only)"],
+                    ] as const).map(([val, label]) => (
+                      <label key={val} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                        <input
+                          type="radio" name="lbMode" value={val}
+                          checked={builder.gateway.lbMode === val}
+                          onChange={() => patchGateway({ lbMode: val })}
+                        />
+                        <span className="text-xs text-gray-600">{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {builder.gateway.lbMode === "index" && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <label className="text-xs text-gray-600">Index:</label>
+                      <select
+                        value={builder.gateway.lbIndex}
+                        onChange={(e) => patchGateway({ lbIndex: parseInt(e.target.value, 10) })}
+                        className="border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none"
+                      >
+                        {[0,1,2,3,4,5,6,7].map((i) => <option key={i} value={i}>F{i}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Subcloud */}
+              {builder.gateway.varType !== "custom" && (
+                <div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer mb-1">
+                    <input
+                      type="checkbox"
+                      checked={builder.gateway.useSubcloud}
+                      onChange={(e) => patchGateway({ useSubcloud: e.target.checked })}
+                      className="rounded"
+                    />
+                    Organization uses a subcloud
+                  </label>
+                  {builder.gateway.useSubcloud && (
+                    <div className="ml-5 mt-1.5 space-y-1.5">
+                      <div className="flex gap-2 items-center">
+                        {subClouds.length > 0 ? (
+                          <select
+                            value={builder.gateway.subcloudName}
+                            onChange={(e) => patchGateway({ subcloudName: e.target.value })}
+                            className="w-40 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                          >
+                            <option value="">— select —</option>
+                            {subClouds.map((sc) => (
+                              <option key={sc.id} value={sc.name}>{sc.name}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={builder.gateway.subcloudName}
+                            onChange={(e) => patchGateway({ subcloudName: e.target.value })}
+                            placeholder="myorg"
+                            className="w-32 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                          />
+                        )}
+                        <span className="text-xs text-gray-400">.</span>
+                        <span className="text-sm font-mono text-gray-600 min-w-[4rem]">
+                          {builder.gateway.subcloudCloud || "zscaler"}
+                        </span>
+                        <span className="text-xs text-gray-400 font-mono">.net</span>
+                      </div>
+                      {subClouds.length === 0 && (
+                        <p className="text-xs text-gray-400">No subclouds found in local DB — run an import first, or enter manually above.</p>
+                      )}
+                      {builder.gateway.subcloudName && builder.gateway.subcloudCloud && (
+                        <p className="text-xs text-gray-500 font-mono">
+                          → {`\${GATEWAY.${builder.gateway.subcloudName}.${builder.gateway.subcloudCloud}.net}`}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Secondary + fallback */}
+              {builder.gateway.varType !== "custom" && (
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.gateway.includeSecondary}
+                    onChange={(e) => patchGateway({ includeSecondary: e.target.checked })}
+                    className="rounded"
+                  />
+                  Include <code className="text-xs bg-gray-100 px-1 rounded">{"{SECONDARY_GATEWAY}"}</code> for failover
+                </label>
+              )}
+
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={builder.gateway.fallbackDirect}
+                  onChange={(e) => patchGateway({ fallbackDirect: e.target.checked })}
+                  className="rounded"
+                />
+                Fall back to DIRECT if all proxies are unreachable
+              </label>
+            </fieldset>
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── DIRECT bypass rules ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-3">Send DIRECT (bypass proxy)</h3>
+            <div className="space-y-3">
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.bypassPlainHostnames}
+                    onChange={(e) => patchBuilder({ bypassPlainHostnames: e.target.checked })}
+                    disabled={isPending}
+                    className="rounded"
+                  />
+                  Plain hostnames (no dots — e.g. <code className="text-xs bg-gray-100 px-1 rounded">intranet</code>)
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.bypassLocalhost}
+                    onChange={(e) => patchBuilder({ bypassLocalhost: e.target.checked })}
+                    disabled={isPending}
+                    className="rounded"
+                  />
+                  Localhost (127.0.0.1)
+                </label>
+              </div>
+
+              <TagInput
+                label="IP subnets"
+                placeholder="e.g. 10.0.0.0/8"
+                hint="CIDR notation. Traffic to these ranges goes direct."
+                items={builder.directSubnets}
+                onChange={(v) => patchBuilder({ directSubnets: v })}
+                disabled={isPending}
+              />
+
+              <TagInput
+                label="Domains and host patterns"
+                placeholder="e.g. .corp.example.com  or  *.internal"
+                hint="Prefix with '.' for domain suffix match. Use '*' wildcards for shell-pattern match."
+                items={builder.directDomains}
+                onChange={(v) => patchBuilder({ directDomains: v })}
+                disabled={isPending}
+              />
+            </div>
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Default action ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-2">Default action</h3>
+            <p className="text-xs text-gray-500 mb-2">Applied to all traffic not matched by a DIRECT rule above.</p>
+            <div className="flex gap-4">
+              {(["PROXY", "DIRECT"] as const).map((opt) => (
+                <label key={opt} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="defaultAction"
+                    value={opt}
+                    checked={builder.defaultAction === opt}
+                    onChange={() => patchBuilder({ defaultAction: opt })}
+                    disabled={isPending}
+                  />
+                  {opt}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Generated PAC preview + validate ── */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide">Generated PAC</h3>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleValidate}
+                  disabled={validating || isPending}
+                  className="px-3 py-1 text-xs rounded-md bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                >
+                  {validating ? "Validating…" : "Validate Syntax"}
+                </button>
+                {validation !== null && (
+                  <span className={`text-xs font-medium ${validation.success ? "text-green-600" : "text-red-600"}`}>
+                    {validation.success
+                      ? "✓ Valid"
+                      : `✗ ${validation.errorCount ?? 0} error(s)${validation.message ? `: ${validation.message}` : ""}`}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewOpen((o) => !o)}
+                  className="text-xs text-gray-500 hover:text-gray-700"
+                >
+                  {previewOpen ? "Hide" : "Preview"}
+                </button>
+              </div>
+            </div>
+            {previewOpen && (
+              <pre className="border border-gray-200 rounded-md px-3 py-3 text-xs font-mono text-gray-700 bg-gray-50 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre">
+                {generatedPac}
+              </pre>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-gray-200 flex justify-end gap-3">
+          <button
+            onClick={onClose} disabled={isPending}
+            className="px-4 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={isPending || !name.trim() || (builder.defaultAction === "PROXY" && builder.gateway.varType === "custom" && !builder.gateway.customAddress.trim())}
+            className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+          >
+            {isPending ? "Saving…" : isCreate ? "Create" : "Push New Version"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PacFileRow({
+  tenantName,
+  pac,
+  onEdit,
+  onDeleted,
+}: {
+  tenantName: string;
+  pac: PacFile;
+  onEdit: (p: PacFile) => void;
+  onDeleted: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteErr, setDeleteErr] = useState<string | null>(null);
+
+  const deleteMut = useMutation({
+    mutationFn: () => deletePacFile(tenantName, pac.id),
+    onSuccess: () => onDeleted(),
+    onError: (e: Error) => setDeleteErr(e.message),
+  });
+
+  const isReadOnly = pac.editable === false;
+
+  return (
+    <>
+      <tr className="hover:bg-gray-50 cursor-pointer" onClick={() => setExpanded((e) => !e)}>
+        <td className="px-3 py-2 font-mono text-xs text-gray-500">{pac.id}</td>
+        <td className="px-3 py-2 text-gray-900">{pac.name}</td>
+        <td className="px-3 py-2 text-gray-500">{pac.description ?? "-"}</td>
+        <td className="px-3 py-2 text-gray-500">{pac.domain ?? "-"}</td>
+        <td className="px-3 py-2 text-xs text-gray-500 font-mono">{pac.pacVersion ?? "-"}</td>
+        <td className="px-3 py-2 text-xs text-gray-400 font-mono break-all">{pac.pacUrl ?? "-"}</td>
+        <td className="px-3 py-2 text-xs text-gray-400">
+          {pac.lastModifiedTime ? new Date(pac.lastModifiedTime * 1000).toLocaleDateString() : "-"}
+        </td>
+        <td className="px-3 py-2">
+          <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => onEdit(pac)}
+              disabled={isReadOnly || deleteMut.isPending}
+              title={isReadOnly ? "Read-only (Zscaler-managed)" : "Edit"}
+              className="px-2 py-1 text-xs rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Edit
+            </button>
+            <button
+              onClick={() => setConfirmDelete(true)}
+              disabled={isReadOnly || deleteMut.isPending}
+              title={isReadOnly ? "Read-only (Zscaler-managed)" : "Delete"}
+              className="px-2 py-1 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-40"
+            >
+              Delete
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={7} className="px-3 py-2 bg-gray-50">
+            {deleteErr && (
+              <div className="mb-2 text-xs text-red-600">{deleteErr}</div>
+            )}
+            {isReadOnly && (
+              <div className="text-xs text-amber-600 italic">This PAC file is read-only (Zscaler-managed).</div>
+            )}
+          </td>
+        </tr>
+      )}
+      {confirmDelete && (
+        <tr>
+          <td colSpan={7} className="px-3 py-2 bg-red-50">
+            <div className="flex items-center gap-3 text-sm text-red-700">
+              <span>Delete &ldquo;{pac.name}&rdquo; and all its versions?</span>
+              <button
+                onClick={() => { setDeleteErr(null); deleteMut.mutate(); setConfirmDelete(false); }}
+                disabled={deleteMut.isPending}
+                className="px-3 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {deleteMut.isPending ? "Deleting..." : "Confirm Delete"}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="px-3 py-1 text-xs rounded border border-gray-300 text-gray-700 hover:bg-white"
+              >
+                Cancel
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function PacFilesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [modalPac, setModalPac] = useState<PacFile | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-pac-files", tenantName],
+    queryFn: () => fetchPacFiles(tenantName),
+    enabled: isOpen,
+  });
+
+  function openCreate() { setModalPac(null); setModalOpen(true); }
+  function openEdit(p: PacFile) { setModalPac(p); setModalOpen(true); }
+  function closeModal() { setModalOpen(false); }
+  function onSaved() { qc.invalidateQueries({ queryKey: ["zia-pac-files", tenantName] }); }
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <button
+          onClick={openCreate}
+          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+        >
+          + Add PAC File
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Version</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">PAC URL</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Last Modified</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {(data ?? []).map((p: PacFile) => (
+              <PacFileRow
+                key={p.id}
+                tenantName={tenantName}
+                pac={p}
+                onEdit={openEdit}
+                onDeleted={() => qc.invalidateQueries({ queryKey: ["zia-pac-files", tenantName] })}
+              />
+            ))}
+            {(data ?? []).length === 0 && (
+              <tr><td colSpan={8} className="px-3 py-4 text-center text-gray-400">No PAC files</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {modalOpen && (
+        <PacFileModal
+          tenantName={tenantName}
+          pac={modalPac}
+          onClose={closeModal}
+          onSaved={onSaved}
+        />
+      )}
     </div>
   );
 }
@@ -5120,6 +6092,16 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
       </SectionGroup>
 
+      {/* Traffic Forwarding */}
+      <SectionGroup title="Traffic Forwarding" isOpen={!!groups.trafficFwd} onToggle={() => toggleGroup("trafficFwd")}>
+        <Accordion title="Forwarding Rules" isOpen={!!open.forwarding} onToggle={() => toggle("forwarding")}>
+          <ForwardingRulesSection tenantName={tenant.name} isOpen={!!open.forwarding} />
+        </Accordion>
+        <Accordion title="PAC Files" isOpen={!!open.pacFiles} onToggle={() => toggle("pacFiles")}>
+          <PacFilesSection tenantName={tenant.name} isOpen={!!open.pacFiles} />
+        </Accordion>
+      </SectionGroup>
+
       {/* Network Security */}
       <SectionGroup title="Network Security" isOpen={!!groups.networkSec} onToggle={() => toggleGroup("networkSec")}>
         <Accordion title="Allow / Deny Lists" isOpen={!!open.allowdeny} onToggle={() => toggle("allowdeny")}>
@@ -5130,9 +6112,6 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
         <Accordion title="SSL Inspection" isOpen={!!open.ssl} onToggle={() => toggle("ssl")}>
           <SslInspectionSection tenantName={tenant.name} isOpen={!!open.ssl} />
-        </Accordion>
-        <Accordion title="Traffic Forwarding" isOpen={!!open.forwarding} onToggle={() => toggle("forwarding")}>
-          <ForwardingRulesSection tenantName={tenant.name} isOpen={!!open.forwarding} />
         </Accordion>
         <Accordion title="DNS Filter Rules" isOpen={!!open.dnsFilter} onToggle={() => toggle("dnsFilter")}>
           <FirewallDnsRulesSection tenantName={tenant.name} isOpen={!!open.dnsFilter} />
