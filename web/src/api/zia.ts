@@ -719,7 +719,6 @@ export interface PacFileCreatePayload {
   description?: string;
   domain?: string;
   pac_content: string;
-  pac_commit_message: string;
   pac_verification_status?: string;
   pac_version_status?: string;
 }
@@ -728,7 +727,6 @@ export interface PacFileUpdatePayload {
   name: string;
   description?: string;
   pac_content: string;
-  pac_commit_message: string;
   pac_verification_status?: string;
   pac_version_status?: string;
 }
@@ -774,3 +772,6 @@ export const deletePacFile = (
   apiFetch<{ deleted: boolean }>(`${base(tenant)}/pac-files/${pacId}`, {
     method: "DELETE",
   });
+
+export const fetchOrgDomains = (tenant: string): Promise<string[]> =>
+  apiFetch<string[]>(`${base(tenant)}/org-domains`);

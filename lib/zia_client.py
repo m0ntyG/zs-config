@@ -122,6 +122,15 @@ class ZIAClient:
         """Direct HTTP DELETE to the ZIA API."""
         self._zia_request("DELETE", path)
 
+    def get_org_domains(self) -> List[str]:
+        """Return the list of domains registered with this ZIA organization."""
+        try:
+            data = self.zia_get("/zia/api/v1/orgInformation/lite")
+            domains = data.get("domains", [])
+            return [d for d in domains if isinstance(d, str) and d]
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     # Activation
     # ------------------------------------------------------------------

@@ -66,6 +66,7 @@ import {
   createPacFile,
   updatePacFile,
   deletePacFile,
+  fetchOrgDomains,
   UrlCategory,
   UrlCategoryDetail,
   UrlFilteringRule,
@@ -2041,6 +2042,126 @@ function TenancyRestrictionsSection({ tenantName, isOpen }: { tenantName: string
 
 // ── PAC Files ─────────────────────────────────────────────────────────────────
 
+// ---------------------------------------------------------------------------
+// PAC builder helpers
+// ---------------------------------------------------------------------------
+
+interface PacBuilderConfig {
+  proxyServer: string;
+  fallbackDirect: boolean;
+  bypassPlainHostnames: boolean;
+  bypassLocalhost: boolean;
+  directSubnets: string[];   // CIDR, e.g. "10.0.0.0/8"
+  directDomains: string[];   // e.g. ".corp.com", "*.internal", "host.local"
+  defaultAction: "PROXY" | "DIRECT";
+}
+
+function cidrToNetMask(cidr: string): [string, string] | null {
+  const parts = cidr.trim().split("/");
+  if (parts.length !== 2) return null;
+  const prefix = parseInt(parts[1], 10);
+  if (isNaN(prefix) || prefix < 0 || prefix > 32) return null;
+  const bits = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const mask = [(bits >>> 24) & 255, (bits >>> 16) & 255, (bits >>> 8) & 255, bits & 255].join(".");
+  return [parts[0], mask];
+}
+
+function generatePac(cfg: PacBuilderConfig): string {
+  const lines: string[] = ["function FindProxyForURL(url, host) {"];
+
+  if (cfg.bypassPlainHostnames)
+    lines.push('  if (isPlainHostName(host)) return "DIRECT";');
+
+  if (cfg.bypassLocalhost)
+    lines.push('  if (host === "localhost" || host === "127.0.0.1") return "DIRECT";');
+
+  const validSubnets = cfg.directSubnets
+    .map((s) => cidrToNetMask(s.trim()))
+    .filter((r): r is [string, string] => r !== null);
+
+  if (validSubnets.length > 0) {
+    lines.push("  var ipAddr = dnsResolve(host);");
+    lines.push("  if (ipAddr) {");
+    for (const [net, mask] of validSubnets)
+      lines.push(`    if (isInNet(ipAddr, "${net}", "${mask}")) return "DIRECT";`);
+    lines.push("  }");
+  }
+
+  for (const raw of cfg.directDomains) {
+    const p = raw.trim();
+    if (!p) continue;
+    if (p.startsWith("."))
+      lines.push(`  if (dnsDomainIs(host, "${p}")) return "DIRECT";`);
+    else if (p.includes("*") || p.includes("?"))
+      lines.push(`  if (shExpMatch(host, "${p}")) return "DIRECT";`);
+    else
+      lines.push(`  if (host === "${p}" || dnsDomainIs(host, ".${p}")) return "DIRECT";`);
+  }
+
+  if (cfg.defaultAction === "PROXY") {
+    const proxy = cfg.proxyServer.trim() || "gateway.zscaler.net:80";
+    const fallback = cfg.fallbackDirect ? "; DIRECT" : "";
+    lines.push(`  return "PROXY ${proxy}${fallback}";`);
+  } else {
+    lines.push('  return "DIRECT";');
+  }
+
+  lines.push("}");
+  return lines.join("\n");
+}
+
+function TagInput({
+  label, placeholder, items, onChange, disabled, hint,
+}: {
+  label: string; placeholder: string; items: string[];
+  onChange: (items: string[]) => void; disabled?: boolean; hint?: string;
+}) {
+  const [input, setInput] = useState("");
+  function add() {
+    const v = input.trim();
+    if (v && !items.includes(v)) onChange([...items, v]);
+    setInput("");
+  }
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
+      {hint && <p className="text-xs text-gray-500 mb-1">{hint}</p>}
+      <div className="flex gap-2 mb-1.5">
+        <input
+          type="text" value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+          placeholder={placeholder} disabled={disabled}
+          className="flex-1 border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+        />
+        <button
+          type="button" onClick={add}
+          disabled={disabled || !input.trim()}
+          className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >Add</button>
+      </div>
+      {items.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {items.map((item) => (
+            <span key={item} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+              {item}
+              <button
+                type="button" disabled={disabled}
+                onClick={() => onChange(items.filter((i) => i !== item))}
+                className="text-blue-400 hover:text-blue-600 disabled:opacity-60 leading-none"
+              >×</button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PacFileModal
+// ---------------------------------------------------------------------------
+
 function PacFileModal({
   tenantName,
   pac,
@@ -2053,57 +2174,69 @@ function PacFileModal({
   onSaved: () => void;
 }) {
   const isCreate = pac === null;
+
+  // Metadata fields
   const [name, setName] = useState(pac?.name ?? "");
   const [description, setDescription] = useState(pac?.description ?? "");
   const [domain, setDomain] = useState(pac?.domain ?? "");
-  const [pacContent, setPacContent] = useState("");
-  const [commitMessage, setCommitMessage] = useState(isCreate ? "Initial version" : "");
-  const [verifyStatus, setVerifyStatus] = useState("VERIFY_NOERR");
+
+  // PAC builder state
+  const [builder, setBuilder] = useState<PacBuilderConfig>({
+    proxyServer: "",
+    fallbackDirect: true,
+    bypassPlainHostnames: true,
+    bypassLocalhost: true,
+    directSubnets: [],
+    directDomains: [],
+    defaultAction: "PROXY",
+  });
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Validation
   const [validation, setValidation] = useState<{ success: boolean; message?: string; errorCount?: number } | null>(null);
   const [validating, setValidating] = useState(false);
   const [mutErr, setMutErr] = useState<string | null>(null);
 
-  // Fetch versions to pre-fill content for edit mode
+  function patchBuilder(patch: Partial<PacBuilderConfig>) {
+    setBuilder((b) => ({ ...b, ...patch }));
+    setValidation(null);
+  }
+
+  const generatedPac = generatePac(builder);
+
+  // Org domains dropdown
+  const domainsQuery = useQuery({
+    queryKey: ["zia-org-domains", tenantName],
+    queryFn: () => fetchOrgDomains(tenantName),
+    staleTime: 5 * 60 * 1000,
+  });
+  const orgDomains: string[] = domainsQuery.data ?? [];
+
+  // Version history (edit mode)
   const versionsQuery = useQuery({
     queryKey: ["zia-pac-file-versions", tenantName, pac?.id],
     queryFn: () => fetchPacFileVersions(tenantName, pac!.id),
-    enabled: !isCreate && pac !== null,
+    enabled: !isCreate,
   });
-
-  // Pre-fill PAC content from deployed version
-  const deployedContent = (() => {
-    const versions: PacFileVersion[] = versionsQuery.data ?? [];
-    const deployed = versions.find((v) => v.pacVersionStatus === "DEPLOYED") ?? versions[0];
-    return deployed?.pacContent ?? "";
-  })();
-  const [contentPrefilled, setContentPrefilled] = useState(false);
-  if (!isCreate && deployedContent && !contentPrefilled) {
-    setPacContent(deployedContent);
-    setContentPrefilled(true);
-  }
 
   const createMut = useMutation({
     mutationFn: (payload: PacFileCreatePayload) => createPacFile(tenantName, payload),
     onSuccess: () => { onSaved(); onClose(); },
     onError: (e: Error) => setMutErr(e.message),
   });
-
   const updateMut = useMutation({
     mutationFn: (payload: PacFileUpdatePayload) => updatePacFile(tenantName, pac!.id, payload),
     onSuccess: () => { onSaved(); onClose(); },
     onError: (e: Error) => setMutErr(e.message),
   });
-
   const isPending = createMut.isPending || updateMut.isPending;
 
   async function handleValidate() {
-    if (!pacContent.trim()) return;
     setValidating(true);
     setValidation(null);
     try {
-      const result = await validatePacFileContent(tenantName, pacContent);
+      const result = await validatePacFileContent(tenantName, generatedPac);
       setValidation(result);
-      setVerifyStatus(result.success ? "VERIFY_NOERR" : "NOVERIFY");
     } catch {
       setValidation({ success: false, message: "Validation request failed" });
     } finally {
@@ -2112,24 +2245,23 @@ function PacFileModal({
   }
 
   function handleSubmit() {
-    if (!name.trim() || !pacContent.trim() || !commitMessage.trim()) return;
+    if (!name.trim()) return;
     setMutErr(null);
+    const verifyStatus = validation?.success ? "VERIFY_NOERR" : "NOVERIFY";
     if (isCreate) {
       const payload: PacFileCreatePayload = {
         name: name.trim(),
-        pac_content: pacContent,
-        pac_commit_message: commitMessage.trim(),
+        pac_content: generatedPac,
         pac_verification_status: verifyStatus,
         pac_version_status: "DEPLOYED",
       };
       if (description.trim()) payload.description = description.trim();
-      if (domain.trim()) payload.domain = domain.trim();
+      if (domain) payload.domain = domain;
       createMut.mutate(payload);
     } else {
       const payload: PacFileUpdatePayload = {
         name: name.trim(),
-        pac_content: pacContent,
-        pac_commit_message: commitMessage.trim(),
+        pac_content: generatedPac,
         pac_verification_status: verifyStatus,
         pac_version_status: "DEPLOYED",
       };
@@ -2141,6 +2273,7 @@ function PacFileModal({
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
         <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
           <h2 className="text-base font-semibold text-gray-900">
             {isCreate ? "Add PAC File" : `Edit PAC File: ${pac?.name}`}
@@ -2152,10 +2285,8 @@ function PacFileModal({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          {mutErr && (
-            <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{mutErr}</div>
-          )}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {mutErr && <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{mutErr}</div>}
 
           {/* Version history (edit mode) */}
           {!isCreate && versionsQuery.data && versionsQuery.data.length > 0 && (
@@ -2167,9 +2298,8 @@ function PacFileModal({
                 <table className="min-w-full divide-y divide-gray-200 text-xs">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Version</th>
+                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Ver</th>
                       <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Status</th>
-                      <th className="px-3 py-1.5 text-left text-gray-500 uppercase">Commit Message</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -2177,21 +2307,19 @@ function PacFileModal({
                       <tr key={v.pacVersion}>
                         <td className="px-3 py-1.5 font-mono text-gray-500">{v.pacVersion}</td>
                         <td className="px-3 py-1.5 text-gray-700">{v.pacVersionStatus}</td>
-                        <td className="px-3 py-1.5 text-gray-500">{v.pacCommitMessage ?? "-"}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              {/* Deployed content (collapsed by default — can be large) */}
               {(() => {
                 const deployed = versionsQuery.data.find((v: PacFileVersion) => v.pacVersionStatus === "DEPLOYED");
                 return deployed?.pacContent ? (
                   <details className="border-t border-gray-200">
                     <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:bg-gray-50">
-                      View deployed PAC content
+                      View current deployed content
                     </summary>
-                    <pre className="px-3 py-2 text-xs text-gray-700 bg-gray-50 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">
+                    <pre className="px-3 py-2 text-xs text-gray-700 bg-gray-50 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
                       {deployed.pacContent}
                     </pre>
                   </details>
@@ -2200,14 +2328,14 @@ function PacFileModal({
             </details>
           )}
 
-          {/* Form fields */}
+          {/* ── Metadata ── */}
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Name <span className="text-red-500">*</span>
+              </label>
               <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                type="text" value={name} onChange={(e) => setName(e.target.value)}
                 disabled={isPending}
                 className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
               />
@@ -2215,9 +2343,7 @@ function PacFileModal({
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
               <input
-                type="text"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                type="text" value={description} onChange={(e) => setDescription(e.target.value)}
                 disabled={isPending}
                 className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
               />
@@ -2225,84 +2351,177 @@ function PacFileModal({
             {isCreate && (
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Domain</label>
-                <input
-                  type="text"
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value)}
-                  disabled={isPending}
-                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
-                />
+                <select
+                  value={domain} onChange={(e) => setDomain(e.target.value)}
+                  disabled={isPending || domainsQuery.isLoading}
+                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60 bg-white"
+                >
+                  <option value="">— None —</option>
+                  {orgDomains.map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
               </div>
             )}
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Commit Message <span className="text-red-500">*</span></label>
-              <input
-                type="text"
-                value={commitMessage}
-                onChange={(e) => setCommitMessage(e.target.value)}
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Proxy server ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-3">Proxy Configuration</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Proxy server <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={builder.proxyServer}
+                  onChange={(e) => patchBuilder({ proxyServer: e.target.value })}
+                  disabled={isPending || builder.defaultAction === "DIRECT"}
+                  placeholder="gateway.zscaler.net:80"
+                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-40"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={builder.fallbackDirect}
+                  onChange={(e) => patchBuilder({ fallbackDirect: e.target.checked })}
+                  disabled={isPending || builder.defaultAction === "DIRECT"}
+                  className="rounded"
+                />
+                Fall back to DIRECT if proxy is unreachable
+              </label>
+            </div>
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── DIRECT bypass rules ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-3">Send DIRECT (bypass proxy)</h3>
+            <div className="space-y-3">
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.bypassPlainHostnames}
+                    onChange={(e) => patchBuilder({ bypassPlainHostnames: e.target.checked })}
+                    disabled={isPending}
+                    className="rounded"
+                  />
+                  Plain hostnames (no dots — e.g. <code className="text-xs bg-gray-100 px-1 rounded">intranet</code>)
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.bypassLocalhost}
+                    onChange={(e) => patchBuilder({ bypassLocalhost: e.target.checked })}
+                    disabled={isPending}
+                    className="rounded"
+                  />
+                  Localhost (127.0.0.1)
+                </label>
+              </div>
+
+              <TagInput
+                label="IP subnets"
+                placeholder="e.g. 10.0.0.0/8"
+                hint="CIDR notation. Traffic to these ranges goes direct."
+                items={builder.directSubnets}
+                onChange={(v) => patchBuilder({ directSubnets: v })}
                 disabled={isPending}
-                placeholder="Describe this version..."
-                className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+              />
+
+              <TagInput
+                label="Domains and host patterns"
+                placeholder="e.g. .corp.example.com  or  *.internal"
+                hint="Prefix with '.' for domain suffix match. Use '*' wildcards for shell-pattern match."
+                items={builder.directDomains}
+                onChange={(v) => patchBuilder({ directDomains: v })}
+                disabled={isPending}
               />
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Verification Status</label>
-              <select
-                value={verifyStatus}
-                onChange={(e) => setVerifyStatus(e.target.value)}
-                disabled={isPending}
-                className="border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
-              >
-                <option value="VERIFY_NOERR">Verify (no errors)</option>
-                <option value="NOVERIFY">Skip verification</option>
-                <option value="VERIFY_ERR">Verify (allow errors)</option>
-              </select>
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Default action ── */}
+          <div>
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-2">Default action</h3>
+            <p className="text-xs text-gray-500 mb-2">Applied to all traffic not matched by a DIRECT rule above.</p>
+            <div className="flex gap-4">
+              {(["PROXY", "DIRECT"] as const).map((opt) => (
+                <label key={opt} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="defaultAction"
+                    value={opt}
+                    checked={builder.defaultAction === opt}
+                    onChange={() => patchBuilder({ defaultAction: opt })}
+                    disabled={isPending}
+                  />
+                  {opt}
+                </label>
+              ))}
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">PAC Content <span className="text-red-500">*</span></label>
-              <textarea
-                value={pacContent}
-                onChange={(e) => { setPacContent(e.target.value); setValidation(null); }}
-                disabled={isPending}
-                rows={12}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
-                placeholder="function FindProxyForURL(url, host) { ... }"
-              />
-              <div className="mt-1 flex items-center gap-3">
+          </div>
+
+          <hr className="border-gray-200" />
+
+          {/* ── Generated PAC preview + validate ── */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide">Generated PAC</h3>
+              <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={handleValidate}
-                  disabled={validating || isPending || !pacContent.trim()}
-                  className="px-3 py-1 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                  disabled={validating || isPending}
+                  className="px-3 py-1 text-xs rounded-md bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 disabled:opacity-60"
                 >
-                  {validating ? "Validating..." : "Validate"}
+                  {validating ? "Validating…" : "Validate Syntax"}
                 </button>
                 {validation !== null && (
-                  <span className={`text-xs ${validation.success ? "text-green-600" : "text-red-600"}`}>
+                  <span className={`text-xs font-medium ${validation.success ? "text-green-600" : "text-red-600"}`}>
                     {validation.success
-                      ? "Valid"
-                      : `${validation.errorCount ?? 0} error(s)${validation.message ? `: ${validation.message}` : ""}`}
+                      ? "✓ Valid"
+                      : `✗ ${validation.errorCount ?? 0} error(s)${validation.message ? `: ${validation.message}` : ""}`}
                   </span>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewOpen((o) => !o)}
+                  className="text-xs text-gray-500 hover:text-gray-700"
+                >
+                  {previewOpen ? "Hide" : "Preview"}
+                </button>
               </div>
             </div>
+            {previewOpen && (
+              <pre className="border border-gray-200 rounded-md px-3 py-3 text-xs font-mono text-gray-700 bg-gray-50 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre">
+                {generatedPac}
+              </pre>
+            )}
           </div>
         </div>
 
+        {/* Footer */}
         <div className="px-5 py-4 border-t border-gray-200 flex justify-end gap-3">
           <button
-            onClick={onClose}
-            disabled={isPending}
+            onClick={onClose} disabled={isPending}
             className="px-4 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
             Cancel
           </button>
           <button
             onClick={handleSubmit}
-            disabled={isPending || !name.trim() || !pacContent.trim() || !commitMessage.trim()}
+            disabled={isPending || !name.trim() || !builder.proxyServer.trim() && builder.defaultAction === "PROXY"}
             className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
           >
-            {isPending ? "Saving..." : isCreate ? "Create" : "Push New Version"}
+            {isPending ? "Saving…" : isCreate ? "Create" : "Push New Version"}
           </button>
         </div>
       </div>

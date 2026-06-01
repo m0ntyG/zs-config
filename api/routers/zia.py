@@ -834,6 +834,19 @@ def delete_snapshot(
 
 
 # ------------------------------------------------------------------
+# Organization
+# ------------------------------------------------------------------
+
+@router.get("/{tenant}/org-domains")
+def get_org_domains(tenant: str, user: AuthUser = Depends(require_auth)):
+    """Return the list of domains registered with this ZIA organization."""
+    try:
+        return _get_service(tenant, user).client.get_org_domains()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------
 # PAC Files
 # ------------------------------------------------------------------
 
@@ -842,7 +855,7 @@ class PacFileCreateRequest(BaseModel):
     description: Optional[str] = None
     domain: Optional[str] = None
     pac_content: str
-    pac_commit_message: str
+    pac_commit_message: Optional[str] = None
     pac_verification_status: str = "VERIFY_NOERR"
     pac_version_status: str = "DEPLOYED"
 
@@ -851,7 +864,7 @@ class PacFileUpdateRequest(BaseModel):
     name: str
     description: Optional[str] = None
     pac_content: str
-    pac_commit_message: str
+    pac_commit_message: Optional[str] = None
     pac_verification_status: str = "VERIFY_NOERR"
     pac_version_status: str = "DEPLOYED"
 
