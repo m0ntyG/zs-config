@@ -2046,14 +2046,44 @@ function TenancyRestrictionsSection({ tenantName, isOpen }: { tenantName: string
 // PAC builder helpers
 // ---------------------------------------------------------------------------
 
-interface PacBuilderConfig {
-  proxyServer: string;
+interface GatewayConfig {
+  varType: "GATEWAY" | "GATEWAY_HOST" | "custom";
+  customAddress: string;
+  lbMode: "none" | "index" | "dynamic";
+  lbIndex: number;             // 0–7, used when lbMode === "index"
+  port: string;                // e.g. "9400" or "${ZS_CUSTOM_PORT}"
+  useSubcloud: boolean;
+  subcloadName: string;        // e.g. "myorg"
+  subcloadDomain: string;      // e.g. "zscaler.net"
+  includeSecondary: boolean;
   fallbackDirect: boolean;
+}
+
+interface PacBuilderConfig {
+  gateway: GatewayConfig;
   bypassPlainHostnames: boolean;
   bypassLocalhost: boolean;
   directSubnets: string[];   // CIDR, e.g. "10.0.0.0/8"
   directDomains: string[];   // e.g. ".corp.com", "*.internal", "host.local"
   defaultAction: "PROXY" | "DIRECT";
+}
+
+function buildGatewayVar(gw: GatewayConfig): string {
+  if (gw.varType === "custom") return gw.customAddress || "gateway.zscaler.net";
+  const sub = gw.useSubcloud && gw.subcloadName && gw.subcloadDomain
+    ? `.${gw.subcloadName}.${gw.subcloadDomain}` : "";
+  const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
+  const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
+  return `\${GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
+}
+
+function buildSecondaryVar(gw: GatewayConfig): string {
+  const sep = gw.useSubcloud && gw.subcloadName ? "." : "_";
+  const sub = gw.useSubcloud && gw.subcloadName && gw.subcloadDomain
+    ? `.${gw.subcloadName}.${gw.subcloadDomain}` : "";
+  const hostSuffix = gw.varType === "GATEWAY_HOST" ? "_HOST" : "";
+  const lbSuffix = gw.lbMode === "index" ? `_F${gw.lbIndex}` : gw.lbMode === "dynamic" ? "_FX" : "";
+  return `\${SECONDARY${sep}GATEWAY${sub}${hostSuffix}${lbSuffix}}`;
 }
 
 function cidrToNetMask(cidr: string): [string, string] | null {
@@ -2099,9 +2129,15 @@ function generatePac(cfg: PacBuilderConfig): string {
   }
 
   if (cfg.defaultAction === "PROXY") {
-    const proxy = cfg.proxyServer.trim() || "gateway.zscaler.net:80";
-    const fallback = cfg.fallbackDirect ? "; DIRECT" : "";
-    lines.push(`  return "PROXY ${proxy}${fallback}";`);
+    const gw = cfg.gateway;
+    const primary = buildGatewayVar(gw);
+    let ret = `PROXY ${primary}:${gw.port || "9400"}`;
+    if (gw.includeSecondary && gw.varType !== "custom") {
+      const secondary = buildSecondaryVar(gw);
+      ret += `; PROXY ${secondary}:${gw.port || "9400"}`;
+    }
+    if (gw.fallbackDirect) ret += "; DIRECT";
+    lines.push(`  return "${ret}";`);
   } else {
     lines.push('  return "DIRECT";');
   }
@@ -2182,8 +2218,18 @@ function PacFileModal({
 
   // PAC builder state
   const [builder, setBuilder] = useState<PacBuilderConfig>({
-    proxyServer: "",
-    fallbackDirect: true,
+    gateway: {
+      varType: "GATEWAY",
+      customAddress: "",
+      lbMode: "none",
+      lbIndex: 0,
+      port: "9400",
+      useSubcloud: false,
+      subcloadName: "",
+      subcloadDomain: "zscaler.net",
+      includeSecondary: true,
+      fallbackDirect: true,
+    },
     bypassPlainHostnames: true,
     bypassLocalhost: true,
     directSubnets: [],
@@ -2199,6 +2245,11 @@ function PacFileModal({
 
   function patchBuilder(patch: Partial<PacBuilderConfig>) {
     setBuilder((b) => ({ ...b, ...patch }));
+    setValidation(null);
+  }
+
+  function patchGateway(patch: Partial<GatewayConfig>) {
+    setBuilder((b) => ({ ...b, gateway: { ...b.gateway, ...patch } }));
     setValidation(null);
   }
 
@@ -2370,31 +2421,144 @@ function PacFileModal({
           {/* ── Proxy server ── */}
           <div>
             <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-wide mb-3">Proxy Configuration</h3>
-            <div className="space-y-3">
+            <fieldset disabled={isPending || builder.defaultAction === "DIRECT"} className="space-y-3 disabled:opacity-40">
+              {/* Gateway variable type */}
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Proxy server <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={builder.proxyServer}
-                  onChange={(e) => patchBuilder({ proxyServer: e.target.value })}
-                  disabled={isPending || builder.defaultAction === "DIRECT"}
-                  placeholder="gateway.zscaler.net:80"
-                  className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-40"
-                />
+                <label className="block text-xs font-medium text-gray-700 mb-1">Gateway address</label>
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    ["GATEWAY", "${GATEWAY} — auto-resolved IP (recommended)"],
+                    ["GATEWAY_HOST", "${GATEWAY_HOST} — hostname, required for Kerberos / IPv6"],
+                    ["custom", "Custom hostname or IP"],
+                  ] as const).map(([val, label]) => (
+                    <label key={val} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                      <input
+                        type="radio" name="gatewayType" value={val}
+                        checked={builder.gateway.varType === val}
+                        onChange={() => patchGateway({ varType: val })}
+                      />
+                      <span className="font-mono text-xs text-gray-600">{label}</span>
+                    </label>
+                  ))}
+                </div>
+                {builder.gateway.varType === "custom" && (
+                  <input
+                    type="text"
+                    value={builder.gateway.customAddress}
+                    onChange={(e) => patchGateway({ customAddress: e.target.value })}
+                    placeholder="proxy.example.com"
+                    className="mt-2 w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                  />
+                )}
               </div>
+
+              {/* Port */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={builder.gateway.port}
+                    onChange={(e) => patchGateway({ port: e.target.value })}
+                    className="w-28 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                    placeholder="9400"
+                  />
+                  <span className="text-xs text-gray-400">Common: 80 · 443 · 9400 · 9443 · 9480</span>
+                </div>
+              </div>
+
+              {/* Load balancing — only for Zscaler variables */}
+              {builder.gateway.varType !== "custom" && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Load balancing</label>
+                  <div className="flex flex-col gap-1.5">
+                    {([
+                      ["none", "None — single gateway IP"],
+                      ["index", "Index (F0–F7) — distribute across up to 8 VIPs"],
+                      ["dynamic", "Dynamic (FX) — per-client fingerprint (ZCC only)"],
+                    ] as const).map(([val, label]) => (
+                      <label key={val} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                        <input
+                          type="radio" name="lbMode" value={val}
+                          checked={builder.gateway.lbMode === val}
+                          onChange={() => patchGateway({ lbMode: val })}
+                        />
+                        <span className="text-xs text-gray-600">{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {builder.gateway.lbMode === "index" && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <label className="text-xs text-gray-600">Index:</label>
+                      <select
+                        value={builder.gateway.lbIndex}
+                        onChange={(e) => patchGateway({ lbIndex: parseInt(e.target.value, 10) })}
+                        className="border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none"
+                      >
+                        {[0,1,2,3,4,5,6,7].map((i) => <option key={i} value={i}>F{i}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Subcloud */}
+              {builder.gateway.varType !== "custom" && (
+                <div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer mb-1">
+                    <input
+                      type="checkbox"
+                      checked={builder.gateway.useSubcloud}
+                      onChange={(e) => patchGateway({ useSubcloud: e.target.checked })}
+                      className="rounded"
+                    />
+                    Organization uses a subcloud
+                  </label>
+                  {builder.gateway.useSubcloud && (
+                    <div className="ml-5 mt-1 flex gap-2 items-center">
+                      <input
+                        type="text"
+                        value={builder.gateway.subcloadName}
+                        onChange={(e) => patchGateway({ subcloadName: e.target.value })}
+                        placeholder="myorg"
+                        className="w-32 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                      />
+                      <span className="text-xs text-gray-400">.</span>
+                      <input
+                        type="text"
+                        value={builder.gateway.subcloadDomain}
+                        onChange={(e) => patchGateway({ subcloadDomain: e.target.value })}
+                        placeholder="zscaler.net"
+                        className="w-36 border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Secondary + fallback */}
+              {builder.gateway.varType !== "custom" && (
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={builder.gateway.includeSecondary}
+                    onChange={(e) => patchGateway({ includeSecondary: e.target.checked })}
+                    className="rounded"
+                  />
+                  Include <code className="text-xs bg-gray-100 px-1 rounded">{"{SECONDARY_GATEWAY}"}</code> for failover
+                </label>
+              )}
+
               <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={builder.fallbackDirect}
-                  onChange={(e) => patchBuilder({ fallbackDirect: e.target.checked })}
-                  disabled={isPending || builder.defaultAction === "DIRECT"}
+                  checked={builder.gateway.fallbackDirect}
+                  onChange={(e) => patchGateway({ fallbackDirect: e.target.checked })}
                   className="rounded"
                 />
-                Fall back to DIRECT if proxy is unreachable
+                Fall back to DIRECT if all proxies are unreachable
               </label>
-            </div>
+            </fieldset>
           </div>
 
           <hr className="border-gray-200" />
@@ -2518,7 +2682,7 @@ function PacFileModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={isPending || !name.trim() || !builder.proxyServer.trim() && builder.defaultAction === "PROXY"}
+            disabled={isPending || !name.trim() || (builder.defaultAction === "PROXY" && builder.gateway.varType === "custom" && !builder.gateway.customAddress.trim())}
             className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
           >
             {isPending ? "Saving…" : isCreate ? "Create" : "Push New Version"}

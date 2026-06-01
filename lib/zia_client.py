@@ -131,6 +131,11 @@ class ZIAClient:
         except Exception:
             return []
 
+    def list_org_info(self) -> List[Dict]:
+        """Wrap org information singleton as a one-element list for import compatibility."""
+        data = self.zia_get("/zia/api/v1/orgInformation/lite")
+        return [{"id": 1, "name": "org_info", **data}]
+
     # ------------------------------------------------------------------
     # Activation
     # ------------------------------------------------------------------

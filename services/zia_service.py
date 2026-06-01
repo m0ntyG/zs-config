@@ -1366,6 +1366,13 @@ class ZIAService:
     # PAC Files
     # ------------------------------------------------------------------
 
+    def get_org_domains(self) -> List[str]:
+        """Return org domains, reading from local DB when available."""
+        rows = self._list_from_db("org_info")
+        if rows:
+            return [d for d in rows[0].get("domains", []) if isinstance(d, str) and d]
+        return self.client.get_org_domains()
+
     def list_pac_files(self) -> List[Dict]:
         rows = self._list_from_db("pac_file")
         if rows:

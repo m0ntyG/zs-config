@@ -839,9 +839,9 @@ def delete_snapshot(
 
 @router.get("/{tenant}/org-domains")
 def get_org_domains(tenant: str, user: AuthUser = Depends(require_auth)):
-    """Return the list of domains registered with this ZIA organization."""
+    """Return org domains; reads from local DB when available, falls back to live API."""
     try:
-        return _get_service(tenant, user).client.get_org_domains()
+        return _get_service(tenant, user).get_org_domains()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -91,6 +91,8 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("sublocation",    "list_sublocations",    id_field="id"),
     # PAC Files — metadata only (pac_content excluded via filter=pac_content in list_pac_files).
     ResourceDef("pac_file", "list_pac_files", id_field="id", name_field="name"),
+    # Org info singleton — stored so domain dropdown doesn't require a live API call.
+    ResourceDef("org_info", "list_org_info", id_field="id", name_field="name"),
 ]
 
 
