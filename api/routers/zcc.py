@@ -75,6 +75,9 @@ def _build_traffic_profile(
     raw_fp: Optional[Dict],
     zia_pac_file_id: Optional[int] = None,
     zia_pac_file_name: Optional[str] = None,
+    predefined_ip_bypasses: Optional[List[Dict]] = None,
+    custom_ip_bypasses: Optional[List[Dict]] = None,
+    app_service_bypasses: Optional[List[Dict]] = None,
 ) -> Dict:
     """Pure function: build a TrafficProfile dict from two raw_config dicts."""
     pe = raw_policy.get("policyExtension") or {}
@@ -169,9 +172,9 @@ def _build_traffic_profile(
         "processBypasses": process_bypasses,
         "portBypasses": port_bypasses,
         "vpnGatewayBypasses": vpn_bypasses,
-        "predefinedIpBypasses": [],   # resolved from DB by caller if desired
-        "customIpBypasses": [],        # resolved from DB by caller if desired
-        "appServiceBypasses": [],      # resolved from DB by caller if desired
+        "predefinedIpBypasses": predefined_ip_bypasses or [],
+        "customIpBypasses": custom_ip_bypasses or [],
+        "appServiceBypasses": app_service_bypasses or [],
         "tunnelRoutes": tunnel_routes,
         "dnsRoutes": dns_routes,
         "tunnelZappTraffic": bool(raw_policy.get("tunnelZappTraffic")),
@@ -342,4 +345,63 @@ def get_traffic_profile(
                     zia_pac_file_name = pac_row.name
                     break
 
-    return _build_traffic_profile(raw_policy, raw_fp, zia_pac_file_id, zia_pac_file_name)
+        # Resolve bypassAppIds → ip_app_predefined DB records
+        bypass_app_ids = {str(i) for i in (raw_policy.get("bypassAppIds") or [])}
+        bypass_custom_ids = {str(i) for i in (raw_policy.get("bypassCustomAppIds") or [])}
+        app_service_ids = {str(i) for i in (raw_policy.get("appServiceIds") or [])}
+
+        def _resolve_ip_apps(resource_type: str, id_set: set, source: str) -> List[Dict]:
+            if not id_set:
+                return []
+            rows = (
+                session.query(ZCCResource)
+                .filter(
+                    ZCCResource.tenant_id == t.id,
+                    ZCCResource.resource_type == resource_type,
+                    ZCCResource.is_deleted == False,  # noqa: E712
+                    ZCCResource.zcc_id.in_(id_set),
+                )
+                .all()
+            )
+            result = []
+            for row in rows:
+                rc = row.raw_config or {}
+                blob = rc.get("appDataBlob") or []
+                blob_v6 = rc.get("appDataBlobV6") or []
+                result.append({
+                    "id": row.zcc_id,
+                    "appName": rc.get("appName") or row.name or row.zcc_id,
+                    "cidrs": blob if isinstance(blob, list) else [blob],
+                    "cidrsV6": blob_v6 if isinstance(blob_v6, list) else [blob_v6],
+                    "source": source,
+                })
+            return result
+
+        predefined_ip_bypasses = _resolve_ip_apps("ip_app_predefined", bypass_app_ids, "predefined")
+        custom_ip_bypasses = _resolve_ip_apps("ip_app_custom", bypass_custom_ids, "custom")
+
+        app_service_bypasses: List[Dict] = []
+        if app_service_ids:
+            svc_rows = (
+                session.query(ZCCResource)
+                .filter(
+                    ZCCResource.tenant_id == t.id,
+                    ZCCResource.resource_type == "web_app_service",
+                    ZCCResource.is_deleted == False,  # noqa: E712
+                    ZCCResource.zcc_id.in_(app_service_ids),
+                )
+                .all()
+            )
+            for row in svc_rows:
+                rc = row.raw_config or {}
+                proc_names = rc.get("processNames") or rc.get("appProcessNames") or []
+                app_service_bypasses.append({
+                    "id": row.zcc_id,
+                    "appName": rc.get("appName") or row.name or row.zcc_id,
+                    "processNames": proc_names if isinstance(proc_names, list) else [proc_names],
+                })
+
+    return _build_traffic_profile(
+        raw_policy, raw_fp, zia_pac_file_id, zia_pac_file_name,
+        predefined_ip_bypasses, custom_ip_bypasses, app_service_bypasses,
+    )
