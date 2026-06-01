@@ -827,6 +827,22 @@ def restore_zpa_snapshot(
                     counts["skipped"] += 1
                     emit("update", rtype, name, "manual", "update not supported for this resource type")
 
+        # ── Post-restore sync: re-import affected resource types ───────────────
+        affected_types = [
+            rtype for rtype in _RTYPE_ORDER
+            if rtype in diff_by_type
+        ]
+        if affected_types:
+            store.append(job_id, {"type": "progress", "phase": "sync",
+                                  "message": "Syncing local DB..."})
+            try:
+                from services.zpa_import_service import ZPAImportService
+                ZPAImportService(client, svc.tenant_id).run(
+                    resource_types=affected_types
+                )
+            except Exception:
+                pass  # sync is best-effort; restore result is already recorded
+
         store.complete(job_id, {
             "applied": counts["applied"],
             "skipped": counts["skipped"],
