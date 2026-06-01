@@ -45,7 +45,7 @@ def _db_list(tenant_id: int, resource_type: str, q: Optional[str] = None) -> Lis
 
 
 class ZPAService:
-    def __init__(self, client: ZPAClient, tenant_id: Optional[int] = None):
+    def __init__(self, client: Optional[ZPAClient] = None, tenant_id: Optional[int] = None):
         self.client = client
         self.tenant_id = tenant_id
 
@@ -405,7 +405,7 @@ class ZPAService:
             )
             raise
 
-    def delete_connector(self, connector_id: str, connector_name: str) -> bool:
+    def delete_connector(self, connector_id: str, connector_name: str) -> bool:  # TODO: test
         try:
             self.client.delete_connector(connector_id)
         except Exception as exc:
@@ -494,7 +494,7 @@ class ZPAService:
             )
             raise
 
-    def delete_connector_group(self, group_id: str, group_name: str) -> bool:
+    def delete_connector_group(self, group_id: str, group_name: str) -> bool:  # TODO: test
         try:
             self.client.delete_connector_group(group_id)
         except Exception as exc:
@@ -652,7 +652,7 @@ class ZPAService:
             )
             raise
 
-    def delete_pra_portal(self, portal_id: str, portal_name: str) -> bool:
+    def delete_pra_portal(self, portal_id: str, portal_name: str) -> bool:  # TODO: test
         try:
             self.client.delete_pra_portal(portal_id)
         except Exception as exc:
@@ -717,7 +717,7 @@ class ZPAService:
             )
             raise
 
-    def delete_pra_console(self, console_id: str, console_name: str) -> bool:
+    def delete_pra_console(self, console_id: str, console_name: str) -> bool:  # TODO: test
         try:
             self.client.delete_pra_console(console_id)
         except Exception as exc:
@@ -760,7 +760,7 @@ class ZPAService:
         result.sort(key=lambda r: _rule_order_key(int(r.get("rule_order") or 0)))
         return result
 
-    def export_access_policy_csv(self) -> str:
+    def export_access_policy_csv(self) -> str:  # TODO: test
         """Export all access policy rules as a CSV string.
 
         Uses _decode_conditions from zpa_policy_service for condition decoding.

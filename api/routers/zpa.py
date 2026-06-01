@@ -65,6 +65,16 @@ def _get_db_context(tenant_name: str, user: AuthUser):
     return tenant
 
 
+def _get_db_service(tenant_name: str, user: AuthUser):
+    """Returns a ZPAService with no live client — for DB-only read endpoints.
+
+    Does not require zpa_customer_id and avoids constructing a ZPAClient.
+    """
+    from services.zpa_service import ZPAService
+    tenant = _get_db_context(tenant_name, user)
+    return ZPAService(tenant_id=tenant.id)
+
+
 # ------------------------------------------------------------------
 # Certificates
 # ------------------------------------------------------------------
@@ -140,12 +150,12 @@ def patch_application_enabled(
 
 @router.get("/{tenant}/segment-groups")
 def list_segment_groups(tenant: str, user: AuthUser = Depends(require_auth)):
-    return _get_service(tenant, user).list_segment_groups()
+    return _get_db_service(tenant, user).list_segment_groups()
 
 
 @router.get("/{tenant}/server-groups")
 def list_server_groups(tenant: str, user: AuthUser = Depends(require_auth)):
-    return _get_service(tenant, user).list_server_groups()
+    return _get_db_service(tenant, user).list_server_groups()
 
 
 # ------------------------------------------------------------------
@@ -194,8 +204,7 @@ def delete_connector(
 ):
     """Delete an app connector."""
     svc = _get_service(tenant, user)
-    # Resolve name from DB for audit log before deletion
-    rows = svc.list_connectors_from_db()
+    rows = svc.list_connectors_from_db()  # TODO: test name-lookup-then-delete pattern
     name = next((r.get("name", connector_id) for r in rows if r.get("zpa_id") == connector_id), connector_id)
     svc.delete_connector(connector_id, name)
     return {"deleted": True}
@@ -327,7 +336,7 @@ def delete_pra_portal(
 @router.get("/{tenant}/pra-consoles")
 def list_pra_consoles(tenant: str, q: Optional[str] = None, user: AuthUser = Depends(require_auth)):
     """List all PRA consoles (DB-first) with optional name search."""
-    return _get_service(tenant, user).list_pra_consoles_from_db(q=q)
+    return _get_db_service(tenant, user).list_pra_consoles_from_db(q=q)
 
 
 @router.patch("/{tenant}/pra-consoles/{console_id}/enabled")
@@ -366,7 +375,7 @@ def list_access_policy_rules(
     user: AuthUser = Depends(require_auth),
 ):
     """List all access policy rules (DB-first), sorted by rule_order."""
-    return _get_service(tenant, user).list_access_policy_rules_from_db(q=q)
+    return _get_db_service(tenant, user).list_access_policy_rules_from_db(q=q)
 
 
 @router.get("/{tenant}/access-policy/rules/export.csv")
@@ -375,7 +384,7 @@ def export_access_policy_csv(
     user: AuthUser = Depends(require_auth),
 ):
     """Export access policy rules as CSV (DB-first)."""
-    csv_data = _get_service(tenant, user).export_access_policy_csv()
+    csv_data = _get_db_service(tenant, user).export_access_policy_csv()
     return Response(
         content=csv_data,
         media_type="text/csv",
@@ -390,16 +399,16 @@ def export_access_policy_csv(
 @router.get("/{tenant}/saml-attributes")
 def list_saml_attributes(tenant: str, q: Optional[str] = None, user: AuthUser = Depends(require_auth)):
     """List SAML attributes (DB-first)."""
-    return _get_service(tenant, user).list_saml_attributes_from_db(q=q)
+    return _get_db_service(tenant, user).list_saml_attributes_from_db(q=q)
 
 
 @router.get("/{tenant}/scim-attributes")
 def list_scim_attributes(tenant: str, q: Optional[str] = None, user: AuthUser = Depends(require_auth)):
     """List SCIM user attributes (DB-first)."""
-    return _get_service(tenant, user).list_scim_attributes_from_db(q=q)
+    return _get_db_service(tenant, user).list_scim_attributes_from_db(q=q)
 
 
 @router.get("/{tenant}/scim-groups")
 def list_scim_groups(tenant: str, q: Optional[str] = None, user: AuthUser = Depends(require_auth)):
     """List SCIM groups (DB-first)."""
-    return _get_service(tenant, user).list_scim_groups_from_db(q=q)
+    return _get_db_service(tenant, user).list_scim_groups_from_db(q=q)
