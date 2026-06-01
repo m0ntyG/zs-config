@@ -43,6 +43,7 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("app_connector_group",  "list_connector_groups"),
     ResourceDef("app_connector",        "list_connectors"),
     ResourceDef("pra_portal",           "list_pra_portals"),
+    ResourceDef("user_portal",          "list_user_portals"),
     ResourceDef("pra_credential",       "list_credentials"),
     ResourceDef("idp",                  "list_idp"),
     ResourceDef("saml_attribute",       "list_saml_attributes"),
