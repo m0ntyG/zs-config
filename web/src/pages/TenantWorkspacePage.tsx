@@ -85,6 +85,9 @@ import {
   fetchApplications,
   patchApplicationEnabled,
   fetchPraPortals,
+  fetchUserPortals,
+  patchUserPortalEnabled,
+  deleteUserPortal,
   listConnectors,
   patchConnectorEnabled,
   patchConnectorName,
@@ -109,6 +112,7 @@ import {
   ZpaCertificate,
   ZpaApplication,
   ZpaPraPortal,
+  ZpaUserPortal,
   ZpaAppConnector,
   ZpaServiceEdge,
   ZpaSegmentGroup,
@@ -2739,6 +2743,96 @@ function ApplicationsSection({ tenantName, isOpen }: { tenantName: string; isOpe
   );
 }
 
+function UserPortalsSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [pendingToggleId, setPendingToggleId] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zpa-user-portals", tenantName],
+    queryFn: () => fetchUserPortals(tenantName),
+    enabled: isOpen,
+    staleTime: 60_000,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      patchUserPortalEnabled(tenantName, id, enabled),
+    onSettled: () => {
+      setPendingToggleId(null);
+      qc.invalidateQueries({ queryKey: ["zpa-user-portals", tenantName] });
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => deleteUserPortal(tenantName, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["zpa-user-portals", tenantName] }),
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  if (!data) return null;
+
+  const portalToDelete = confirmDeleteId ? data.find((p) => p.zpa_id === confirmDeleteId) : null;
+
+  return (
+    <div className="space-y-3">
+      {confirmDeleteId && portalToDelete && (
+        <ConfirmDialog
+          title="Delete User Portal"
+          message={`Delete user portal "${portalToDelete.name}"? This cannot be undone.`}
+          onConfirm={() => { deleteMut.mutate(confirmDeleteId); setConfirmDeleteId(null); }}
+          onCancel={() => setConfirmDeleteId(null)}
+          destructive
+        />
+      )}
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Domain</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Certificate</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Enabled</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((p: ZpaUserPortal) => (
+              <tr key={p.zpa_id}>
+                <td className="px-3 py-2 text-gray-900">{p.name}</td>
+                <td className="px-3 py-2 text-gray-500 font-mono text-xs">{p.domain ?? "-"}</td>
+                <td className="px-3 py-2 text-gray-500">{p.certificate_name ?? "-"}</td>
+                <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                  <BoolToggle
+                    enabled={p.enabled ?? false}
+                    onToggle={(next) => {
+                      setPendingToggleId(p.zpa_id);
+                      toggleMut.mutate({ id: p.zpa_id, enabled: next });
+                    }}
+                    pending={pendingToggleId === p.zpa_id}
+                  />
+                </td>
+                <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => setConfirmDeleteId(p.zpa_id)}
+                    className="text-xs text-red-500 hover:underline"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-400">No user portals</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function PraPortalsSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -5138,6 +5232,13 @@ function ZpaTab({ tenant }: { tenant: Tenant }) {
       <SectionGroup title="Certificates" isOpen={!!groups.certs} onToggle={() => toggleGroup("certs")}>
         <Accordion title="Browser Access Certificates" isOpen={!!open.certificates} onToggle={() => toggle("certificates")}>
           <CertificatesSection tenantName={tenant.name} isOpen={!!open.certificates} />
+        </Accordion>
+      </SectionGroup>
+
+      {/* User Portals */}
+      <SectionGroup title="User Portals" isOpen={!!groups.userPortals} onToggle={() => toggleGroup("userPortals")}>
+        <Accordion title="User Portals" isOpen={!!open.userPortals} onToggle={() => toggle("userPortals")}>
+          <UserPortalsSection tenantName={tenant.name} isOpen={!!open.userPortals} />
         </Accordion>
       </SectionGroup>
 

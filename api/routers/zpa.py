@@ -20,6 +20,7 @@ from api.schemas.zpa import (
     PRAPortalCreate,
     PRAPortalEnabledPatch,
     ServiceEdgeEnabledPatch,
+    UserPortalEnabledPatch,
 )
 from api.dependencies import require_auth, AuthUser
 
@@ -327,6 +328,41 @@ def delete_pra_portal(
     rows = svc.list_pra_portals_from_db()
     name = next((r.get("name", portal_id) for r in rows if r.get("zpa_id") == portal_id), portal_id)
     svc.delete_pra_portal(portal_id, name)
+    return {"deleted": True}
+
+
+# ------------------------------------------------------------------
+# User Portals (DB-first list + mutations)
+# ------------------------------------------------------------------
+
+@router.get("/{tenant}/user-portals")
+def list_user_portals(tenant: str, q: Optional[str] = None, user: AuthUser = Depends(require_auth)):
+    """List all user portals (DB-first) with optional name search."""
+    return _get_db_service(tenant, user).list_user_portals_from_db(q=q)
+
+
+@router.patch("/{tenant}/user-portals/{portal_id}/enabled")
+def patch_user_portal_enabled(
+    tenant: str,
+    portal_id: str,
+    body: UserPortalEnabledPatch,
+    user: AuthUser = Depends(require_auth),
+):
+    """Enable or disable a user portal."""
+    return _get_service(tenant, user).set_user_portal_enabled(portal_id, body.enabled)
+
+
+@router.delete("/{tenant}/user-portals/{portal_id}")
+def delete_user_portal(
+    tenant: str,
+    portal_id: str,
+    user: AuthUser = Depends(require_auth),
+):
+    """Delete a user portal."""
+    svc = _get_service(tenant, user)
+    rows = svc.list_user_portals_from_db()
+    name = next((r.get("name", portal_id) for r in rows if r.get("zpa_id") == portal_id), portal_id)
+    svc.delete_user_portal(portal_id, name)
     return {"deleted": True}
 
 

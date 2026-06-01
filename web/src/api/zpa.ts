@@ -33,6 +33,20 @@ export interface ZpaPraPortal {
   [key: string]: unknown;
 }
 
+export interface ZpaUserPortal {
+  zpa_id: string;
+  id?: string;
+  name: string;
+  domain?: string;
+  certificate_id?: string;
+  certificate_name?: string;
+  enabled?: boolean;
+  user_notification_enabled?: boolean;
+  user_notification?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
 export interface ZpaSegmentGroup {
   id: string;
   name: string;
@@ -117,6 +131,9 @@ export const fetchApplications = (tenant: string): Promise<ZpaApplication[]> =>
 
 export const fetchPraPortals = (tenant: string): Promise<ZpaPraPortal[]> =>
   apiFetch<ZpaPraPortal[]>(`${base(tenant)}/pra-portals`);
+
+export const fetchUserPortals = (tenant: string): Promise<ZpaUserPortal[]> =>
+  apiFetch<ZpaUserPortal[]>(`${base(tenant)}/user-portals`);
 
 // ── Application mutations ──────────────────────────────────────────────────────
 
@@ -261,6 +278,21 @@ export const patchPraPortalEnabled = (
 
 export const deletePraPortal = (tenant: string, id: string): Promise<{ deleted: boolean }> =>
   apiFetch<{ deleted: boolean }>(`${base(tenant)}/pra-portals/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+export const patchUserPortalEnabled = (
+  tenant: string,
+  id: string,
+  enabled: boolean
+): Promise<ZpaUserPortal> =>
+  apiFetch<ZpaUserPortal>(`${base(tenant)}/user-portals/${encodeURIComponent(id)}/enabled`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled }),
+  });
+
+export const deleteUserPortal = (tenant: string, id: string): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/user-portals/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 

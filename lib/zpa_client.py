@@ -170,6 +170,28 @@ class ZPAClient:
         return True
 
     # ------------------------------------------------------------------
+    # User Portals
+    # ------------------------------------------------------------------
+
+    def list_user_portals(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.user_portal_controller.list_user_portals()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def get_user_portal(self, portal_id: str) -> Dict:
+        result, resp, err = self._sdk.zpa.user_portal_controller.get_user_portal(portal_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_user_portal(self, portal_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zpa.user_portal_controller.update_user_portal(portal_id, **config)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_user_portal(self, portal_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.user_portal_controller.delete_user_portal(portal_id)
+        _unwrap(result, resp, err)
+        return True
+
+    # ------------------------------------------------------------------
     # Privileged Credentials
     # ------------------------------------------------------------------
 

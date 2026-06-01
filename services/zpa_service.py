@@ -697,6 +697,71 @@ class ZPAService:
         return True
 
     # ------------------------------------------------------------------
+    # User Portals (DB-first + mutations)
+    # ------------------------------------------------------------------
+
+    def list_user_portals_from_db(self, q: Optional[str] = None) -> List[Dict]:
+        result = _db_list(self.tenant_id, "user_portal", q)
+        audit_service.log(
+            product="ZPA", operation="list_user_portals", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="user_portal",
+            details={"count": len(result), "source": "db"},
+        )
+        return result
+
+    def set_user_portal_enabled(self, portal_id: str, enabled: bool) -> Dict:
+        from services.zpa_import_service import ZPAImportService
+        portal_name = portal_id
+        try:
+            config = self.client.get_user_portal(portal_id)
+            portal_name = config.get("name", portal_id)
+            config["enabled"] = enabled
+            self.client.update_user_portal(portal_id, config)
+            ZPAImportService(self.client, self.tenant_id).run(resource_types=["user_portal"])
+            row = self._get_db_row("user_portal", portal_id)
+            audit_service.log(
+                product="ZPA", operation="toggle_user_portal", action="UPDATE",
+                status="SUCCESS", tenant_id=self.tenant_id, resource_type="user_portal",
+                resource_id=portal_id, resource_name=portal_name,
+                details={"enabled": enabled},
+            )
+            return row
+        except Exception as exc:
+            audit_service.log(
+                product="ZPA", operation="toggle_user_portal", action="UPDATE",
+                status="FAILURE", tenant_id=self.tenant_id, resource_type="user_portal",
+                resource_id=portal_id, resource_name=portal_name,
+                error_message=str(exc),
+            )
+            raise
+
+    def delete_user_portal(self, portal_id: str, portal_name: str) -> bool:
+        try:
+            self.client.delete_user_portal(portal_id)
+        except Exception as exc:
+            audit_service.log(
+                product="ZPA", operation="delete_user_portal", action="DELETE",
+                status="FAILURE", tenant_id=self.tenant_id, resource_type="user_portal",
+                resource_id=portal_id, resource_name=portal_name,
+                error_message=str(exc),
+            )
+            raise
+        with get_session() as session:
+            rec = (
+                session.query(ZPAResource)
+                .filter_by(tenant_id=self.tenant_id, resource_type="user_portal", zpa_id=portal_id)
+                .first()
+            )
+            if rec:
+                rec.is_deleted = True
+        audit_service.log(
+            product="ZPA", operation="delete_user_portal", action="DELETE",
+            status="SUCCESS", tenant_id=self.tenant_id, resource_type="user_portal",
+            resource_id=portal_id, resource_name=portal_name,
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # PRA Consoles (DB-first + mutations)
     # ------------------------------------------------------------------
 

@@ -51,3 +51,7 @@ class PRAPortalEnabledPatch(BaseModel):
 
 class PRAConsoleEnabledPatch(BaseModel):
     enabled: bool
+
+
+class UserPortalEnabledPatch(BaseModel):
+    enabled: bool
