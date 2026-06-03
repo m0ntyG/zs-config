@@ -170,17 +170,24 @@ function Ensure-VM {
         return
     }
 
-    $ImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-azure.vhd.tar.gz"
-    $tgz  = Join-Path $env:TEMP "ubuntu-2404-cloud.tar.gz"
-    $vhd  = Join-Path $env:TEMP "noble-server-cloudimg-amd64-azure.vhd"
-    $vhdx = Join-Path $env:TEMP "ubuntu-2404-cloud.vhdx"
+    $ImageUrl  = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-azure.vhd.tar.gz"
+    $ExtractDir = Join-Path $env:TEMP "ubuntu-2404-extract"
+    $tgz        = Join-Path $env:TEMP "ubuntu-2404-cloud.tar.gz"
+    $vhdx       = Join-Path $env:TEMP "ubuntu-2404-cloud.vhdx"
+
+    New-Item -ItemType Directory -Force -Path $ExtractDir | Out-Null
 
     Write-Host "Downloading Ubuntu 24.04 cloud image (this may take several minutes)..."
     Invoke-WebRequest -Uri $ImageUrl -OutFile $tgz -UseBasicParsing
 
     Write-Host "Extracting VHD from archive..."
-    & tar -xzf $tgz -C $env:TEMP
+    & tar -xzf $tgz -C $ExtractDir
     if ($LASTEXITCODE -ne 0) { throw "Failed to extract cloud image archive." }
+
+    $vhd = Get-ChildItem -Path $ExtractDir -Filter "*.vhd" -Recurse |
+           Select-Object -First 1 -ExpandProperty FullName
+    if (-not $vhd) { throw "Could not find .vhd file after extraction." }
+    Write-Host "Found: $vhd"
 
     Write-Host "Converting VHD to VHDX..."
     Convert-VHD -Path $vhd -DestinationPath $vhdx -VHDType Dynamic
@@ -192,7 +199,8 @@ function Ensure-VM {
     Copy-Item $vhdx $OsDisk
     Resize-VHD -Path $OsDisk -SizeBytes 42949672960
 
-    Remove-Item $tgz, $vhd, $vhdx -ErrorAction SilentlyContinue
+    Remove-Item $tgz, $vhdx -ErrorAction SilentlyContinue
+    Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host "Building cloud-init seed ISO..."
     $SeedIso = New-SeedIso -SshPublicKey $SshPublicKey
