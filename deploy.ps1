@@ -189,6 +189,9 @@ function Ensure-VM {
     if (-not $vhd) { throw "Could not find .vhd file after extraction." }
     Write-Host "Found: $vhd"
 
+    Write-Host "Clearing sparse flag on VHD (required for Convert-VHD)..."
+    & fsutil sparse setflag $vhd 0
+
     Write-Host "Converting VHD to VHDX..."
     Convert-VHD -Path $vhd -DestinationPath $vhdx -VHDType Dynamic
 
