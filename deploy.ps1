@@ -170,7 +170,7 @@ function Ensure-VM {
         return
     }
 
-    $ImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.vhd"
+    $ImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-azure.vhd"
     $vhd  = Join-Path $env:TEMP "ubuntu-2404-cloud.vhd"
     $vhdx = Join-Path $env:TEMP "ubuntu-2404-cloud.vhdx"
 
