@@ -148,7 +148,7 @@ function New-SeedIso {
     $SeedVhd = Join-Path $KeyDir "seed.vhdx"
     $VhdSizeBytes = 5MB
 
-    # Create the VHD, attach it, format FAT, write seed files, detach.
+    if (Test-Path $SeedVhd) { Remove-Item $SeedVhd -Force }
     New-VHD -Path $SeedVhd -SizeBytes $VhdSizeBytes -Fixed | Out-Null
     $disk = Mount-VHD -Path $SeedVhd -PassThru | Get-Disk
     Initialize-Disk -Number $disk.Number -PartitionStyle MBR
@@ -494,12 +494,14 @@ if ($IsRepo) {
 
 $EnvFile = Join-Path $RepoDir ".env"
 $JwtSecret = $null
+$BindAddr  = $null
+$SslDomain = $null
 
 if (Test-Path $EnvFile) {
     foreach ($line in Get-Content $EnvFile) {
-        if ($line -match "^JWT_SECRET=(.+)$") {
-            $JwtSecret = $Matches[1]
-        }
+        if ($line -match "^JWT_SECRET=(.+)$")    { $JwtSecret = $Matches[1] }
+        if ($line -match "^BIND_ADDR=(.+)$")     { $BindAddr  = $Matches[1] }
+        if ($line -match "^ZS_SSL_DOMAIN=(.+)$") { $SslDomain = $Matches[1] }
     }
 }
 
@@ -512,6 +514,53 @@ if (-not $JwtSecret) {
 }
 
 $env:JWT_SECRET = $JwtSecret
+
+# -- Network binding ------------------------------------------------------------
+
+if (-not $BindAddr) {
+    Write-Host ""
+    Write-Host "Network binding:"
+    Write-Host "  [1] Localhost only - 127.0.0.1 (default, single machine)"
+    Write-Host "  [2] All interfaces - 0.0.0.0   (server / remote access)"
+    $bindChoice = Read-Host "Choice [1/2, default 1]"
+    if ($bindChoice -eq "2") { $BindAddr = "0.0.0.0" } else { $BindAddr = "127.0.0.1" }
+    Add-Content -Path $EnvFile -Value "BIND_ADDR=$BindAddr"
+    Write-Host "Network binding set to $BindAddr - saved to .env."
+    Write-Host ""
+}
+
+$env:BIND_ADDR = $BindAddr
+
+# -- SSL certificate (optional) -------------------------------------------------
+
+if (-not $SslDomain) {
+    Write-Host ""
+    Write-Host "SSL certificate (optional):"
+    Write-Host "  Skip to use HTTP on port 8000, or provide a cert to enable HTTPS on port 8443."
+    $sslChoice = Read-Host "Configure SSL now? [y/N]"
+    if ($sslChoice -match "^[Yy]$") {
+        $SslDomain = Read-Host "Domain (CN/SAN on the cert, e.g. myapp.company.com)"
+        $certSrc   = Read-Host "Path to certificate file (PEM - leaf + CA chain)"
+        $keySrc    = Read-Host "Path to private key file (PEM)"
+
+        if (-not (Test-Path $certSrc)) { Write-Error "Certificate file not found: $certSrc"; exit 1 }
+        if (-not (Test-Path $keySrc))  { Write-Error "Key file not found: $keySrc"; exit 1 }
+
+        $certsDir = Join-Path $RepoDir "certs"
+        New-Item -ItemType Directory -Path $certsDir -Force | Out-Null
+        Copy-Item $certSrc (Join-Path $certsDir "cert.pem") -Force
+        Copy-Item $keySrc  (Join-Path $certsDir "key.pem")  -Force
+
+        Add-Content -Path $EnvFile -Value "ZS_SSL_DOMAIN=$SslDomain"
+        Write-Host "SSL configured for domain $SslDomain - cert files copied to $certsDir"
+        Write-Host ""
+    }
+}
+
+if ($SslDomain) { $env:ZS_SSL_DOMAIN = $SslDomain }
+
+# Always ensure certs/ exists so the bind mount never fails on a fresh clone.
+New-Item -ItemType Directory -Path (Join-Path $RepoDir "certs") -Force | Out-Null
 
 # -- Ensure persistent Docker volumes exist -------------------------------------
 
@@ -576,7 +625,12 @@ try {
     Write-Host ""
     if ($ready) {
         Write-Host ""
-        Write-Host "zs-config is running at http://localhost:8000"
+        if ($SslDomain) {
+            Write-Host "zs-config is running at https://${SslDomain}:8443"
+            Write-Host "(HTTP on port 8000 redirects to HTTPS)"
+        } else {
+            Write-Host "zs-config is running at http://localhost:8000"
+        }
         Write-Host ""
         docker compose logs --tail=5
     } else {
