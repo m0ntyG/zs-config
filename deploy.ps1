@@ -76,7 +76,7 @@ function Ensure-SshKey {
     }
 
     New-Item -ItemType Directory -Force -Path $KeyDir | Out-Null
-    & ssh-keygen -t ed25519 -N "" -f $KeyFile -C "zs-config-deploy"
+    & ssh-keygen -t ed25519 -N '""' -f $KeyFile -C "zs-config-deploy"
     if ($LASTEXITCODE -ne 0) {
         throw "ssh-keygen failed with exit code $LASTEXITCODE"
     }
