@@ -170,12 +170,17 @@ function Ensure-VM {
         return
     }
 
-    $ImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-azure.vhd"
-    $vhd  = Join-Path $env:TEMP "ubuntu-2404-cloud.vhd"
+    $ImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64-azure.vhd.tar.gz"
+    $tgz  = Join-Path $env:TEMP "ubuntu-2404-cloud.tar.gz"
+    $vhd  = Join-Path $env:TEMP "noble-server-cloudimg-amd64-azure.vhd"
     $vhdx = Join-Path $env:TEMP "ubuntu-2404-cloud.vhdx"
 
     Write-Host "Downloading Ubuntu 24.04 cloud image (this may take several minutes)..."
-    Invoke-WebRequest -Uri $ImageUrl -OutFile $vhd -UseBasicParsing
+    Invoke-WebRequest -Uri $ImageUrl -OutFile $tgz -UseBasicParsing
+
+    Write-Host "Extracting VHD from archive..."
+    & tar -xzf $tgz -C $env:TEMP
+    if ($LASTEXITCODE -ne 0) { throw "Failed to extract cloud image archive." }
 
     Write-Host "Converting VHD to VHDX..."
     Convert-VHD -Path $vhd -DestinationPath $vhdx -VHDType Dynamic
@@ -187,7 +192,7 @@ function Ensure-VM {
     Copy-Item $vhdx $OsDisk
     Resize-VHD -Path $OsDisk -SizeBytes 42949672960
 
-    Remove-Item $vhd, $vhdx -ErrorAction SilentlyContinue
+    Remove-Item $tgz, $vhd, $vhdx -ErrorAction SilentlyContinue
 
     Write-Host "Building cloud-init seed ISO..."
     $SeedIso = New-SeedIso -SshPublicKey $SshPublicKey
