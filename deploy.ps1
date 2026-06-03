@@ -161,6 +161,25 @@ function New-SeedIso {
     return $SeedVhd
 }
 
+function Ensure-VmSwitch {
+    # Windows 10/11 creates this automatically; Windows Server does not.
+    $sw = Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue
+    if ($sw) { return "Default Switch" }
+
+    # Reuse any existing external switch.
+    $sw = Get-VMSwitch -SwitchType External -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sw) { Write-Host "Using existing VM switch: $($sw.Name)"; return $sw.Name }
+
+    # Create an external switch on the first connected physical NIC.
+    $nic = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.Virtual -eq $false } |
+           Select-Object -First 1
+    if (-not $nic) { throw "No connected physical network adapter found to create a VM switch." }
+
+    Write-Host "Creating external VM switch on adapter '$($nic.Name)'..."
+    New-VMSwitch -Name "zs-config-external" -NetAdapterName $nic.Name -AllowManagementOS $true | Out-Null
+    return "zs-config-external"
+}
+
 function Ensure-VM {
     param([string]$SshPublicKey)
 
@@ -208,12 +227,14 @@ function Ensure-VM {
     Write-Host "Building cloud-init seed ISO..."
     $SeedIso = New-SeedIso -SshPublicKey $SshPublicKey
 
+    $SwitchName = Ensure-VmSwitch
+
     Write-Host "Creating VM 'zs-config-host'..."
     $vm = New-VM -Name "zs-config-host" `
                  -Generation 2 `
                  -MemoryStartupBytes 2GB `
                  -VHDPath $OsDisk `
-                 -SwitchName "Default Switch"
+                 -SwitchName $SwitchName
 
     Set-VMProcessor -VMName "zs-config-host" -Count 2
     Set-VMMemory    -VMName "zs-config-host" -DynamicMemoryEnabled $true `
