@@ -6776,7 +6776,7 @@ function AppProfileVisualizer({
     ? data.processBypasses.length + data.portBypasses.length + data.vpnGatewayBypasses.length
     : 0;
   const excludeCount = data ? data.tunnelRoutes.filter(r => r.direction === "exclude").length : 0;
-  const localRuleCount = bypassCount + excludeCount;
+  const totalBypassCount = bypassCount;
 
   const tunnelActive = ["tunnel", "dns", "pac"].includes(activeSection);
   const bypassActive = ["process", "port"].includes(activeSection);
@@ -6808,16 +6808,6 @@ function AppProfileVisualizer({
     "Proxy":        "PAC-controlled proxy",
     "Unknown":      "Unknown routing mode",
   };
-
-  const localSubtitle = data
-    ? data.tunnelMode === "Z-Tunnel 1.0"
-      ? `All non-HTTP/S · ${localRuleCount} explicit exclusion${localRuleCount !== 1 ? "s" : ""}`
-      : data.tunnelMode === "Proxy"
-        ? `PAC DIRECT · ${localRuleCount} exclusion${localRuleCount !== 1 ? "s" : ""}`
-        : localRuleCount > 0
-          ? `${localRuleCount} explicit exclusion${localRuleCount !== 1 ? "s" : ""}`
-          : "No explicit bypasses"
-    : "";
 
   // Per-context forwarding profile actions from rawForwardingSnippet
   const fpRaw = data?.rawForwardingSnippet;
@@ -6860,6 +6850,35 @@ function AppProfileVisualizer({
     return data?.zpaEnabled ?? false;
   };
 
+  const ctxDetailedMode = (ctx: string): "T2.0+LP" | "T2.0" | "T1.0" | "Proxy" | "Bypass" | "Unknown" => {
+    const a = getCtxFpAction(ctx);
+    if (Object.keys(a).length === 0) {
+      if (!data) return "Unknown";
+      if (data.tunnelMode === "Z-Tunnel 2.0") return data.listeningProxy ? "T2.0+LP" : "T2.0";
+      if (data.tunnelMode === "Proxy") return "Proxy";
+      return "T1.0";
+    }
+    if ((a.actionType ?? a.action_type) === 3) return "Bypass";
+    if (a.enablePacketTunnel === 1 || a.enable_packet_tunnel === 1) {
+      const spd = (a.systemProxyData ?? a.system_proxy_data ?? {}) as Record<string, unknown>;
+      const hasLP = (a.systemProxy ?? a.system_proxy ?? 0) === 2 || Boolean(spd.enableProxyServer || spd.enable_proxy_server);
+      return hasLP ? "T2.0+LP" : "T2.0";
+    }
+    const spd2 = (a.systemProxyData ?? a.system_proxy_data ?? {}) as Record<string, unknown>;
+    if ((a.systemProxy ?? a.system_proxy ?? 0) === 2 || spd2.enableProxyServer || spd2.enable_proxy_server) return "Proxy";
+    return "T1.0";
+  };
+  const detailedMode = ctxDetailedMode(networkContext);
+  const pacEvaluated = detailedMode !== "T2.0" && detailedMode !== "Bypass" && detailedMode !== "Unknown";
+
+  const localSubtitle = data
+    ? pacEvaluated
+      ? `PAC DIRECT · ${excludeCount} route exclusion${excludeCount !== 1 ? "s" : ""}`
+      : excludeCount > 0
+        ? `${excludeCount} tunnel exclusion${excludeCount !== 1 ? "s" : ""}`
+        : "No explicit exclusions"
+    : "";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-lg shadow-xl w-full max-w-5xl max-h-[90vh] flex flex-col">
@@ -6884,173 +6903,296 @@ function AppProfileVisualizer({
 
           {data && (
             <>
-              {/* ── Node-map diagram ──────────────────────────────────────── */}
-              {/* Layout (viewBox 0 0 860 215):
-                  Device (8,86) — ZCC (136,76) — junction x=305 trunk y=50..166
-                  3 Network Context nodes (314, y=27/85/143) w=172 h=46
-                  All 3 connect → right fork trunk x=510 y=38..180
-                  Fork → ZIA(524,14) / ZPA(524,73) / Local(524,156) */}
+              {/* ── Three-stage pipeline diagram ──────────────────────────── */}
+              {/* Layout (viewBox 0 0 1010 268):
+                  ① App Bypass (116-264) — ② Forwarding: ZCC + 3 context nodes (276-580)
+                  — ③ PAC Decision (604-732) — Destinations (758-980) */}
               <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
                 <svg
-                  viewBox="0 0 860 215"
+                  viewBox="0 0 1010 268"
                   xmlns="http://www.w3.org/2000/svg"
-                  className="w-full"
-                  style={{ height: 215, display: "block" }}
+                  className="w-full block"
                 >
                   <defs>
-                    <marker id="tp3-arr-gray"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
-                    <marker id="tp3-arr-zia"   markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill={tc}/></marker>
-                    <marker id="tp3-arr-zpa"   markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#4f46e5"/></marker>
-                    <marker id="tp3-arr-local" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
+                    <marker id="tp3-arr-gray"   markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
+                    <marker id="tp3-arr-zia"    markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill={tc}/></marker>
+                    <marker id="tp3-arr-zpa"    markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#4f46e5"/></marker>
+                    <marker id="tp3-arr-local"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
+                    <marker id="tp3-arr-bypass" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#9ca3af"/></marker>
                     <filter id="tp3-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.08"/></filter>
                   </defs>
 
-                  {/* ── Left-side edges ───────────────────────────────────────── */}
-                  <line x1="108" y1="108" x2="136" y2="108" stroke="#d1d5db" strokeWidth="2" markerEnd="url(#tp3-arr-gray)"/>
-                  <line x1="286" y1="108" x2="305" y2="108" stroke="#d1d5db" strokeWidth="2"/>
-                  <line x1="305" y1="50"  x2="305" y2="166" stroke="#e5e7eb" strokeWidth="2"/>
-                  <line x1="305" y1="50"  x2="313" y2="50"  stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
-                  <line x1="305" y1="108" x2="313" y2="108" stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
-                  <line x1="305" y1="166" x2="313" y2="166" stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
+                  {/* ── Stage labels ─────────────────────────────────────────── */}
+                  <text x="192" y="14" fontSize="7.5" fill="#d1d5db" textAnchor="middle" fontWeight="500">① APP BYPASS</text>
+                  <text x="424" y="14" fontSize="7.5" fill="#d1d5db" textAnchor="middle" fontWeight="500">② FORWARDING</text>
+                  <text x="668" y="14" fontSize="7.5" fill="#d1d5db" textAnchor="middle" fontWeight="500">③ PAC DECISION</text>
+                  <text x="869" y="14" fontSize="7.5" fill="#d1d5db" textAnchor="middle" fontWeight="500">DESTINATION</text>
 
-                  {/* ── Context → right fork (all 3 always visible) ──────────── */}
-                  <line x1="486" y1="50"
-                    x2="510" y2="50"
+                  {/* ── ZPA line: bypasses PAC stage, runs above all boxes ───── */}
+                  {data.zpaEnabled && (() => {
+                    const zpaCtxOn = ctxZpaOn(networkContext);
+                    return (
+                      <line x1="420" y1="22" x2="746" y2="22"
+                        stroke={zpaCtxOn ? (zpaActive || hovered === "zpa" ? "#4f46e5" : "#a5b4fc") : "#e5e7eb"}
+                        strokeWidth={zpaCtxOn && zpaActive ? 2 : 1.5}
+                        strokeDasharray="5,3" className="pointer-events-none"/>
+                    );
+                  })()}
+
+                  {/* ── Horizontal flow connectors ───────────────────────────── */}
+                  {/* Device → App Bypass */}
+                  <line x1="104" y1="121" x2="116" y2="121" stroke="#d1d5db" strokeWidth="2" markerEnd="url(#tp3-arr-gray)"/>
+                  {/* App Bypass intercepted → ZCC */}
+                  <line x1="264" y1="107" x2="276" y2="107" stroke="#d1d5db" strokeWidth="2" markerEnd="url(#tp3-arr-gray)"/>
+                  {/* ZCC → context trunk */}
+                  <line x1="406" y1="119" x2="420" y2="119" stroke="#d1d5db" strokeWidth="2"/>
+                  {/* PAC trunk → PAC box */}
+                  <line x1="596" y1="119" x2="604" y2="119" stroke="#d1d5db" strokeWidth="2" markerEnd="url(#tp3-arr-gray)"/>
+                  {/* PAC box → dest trunk */}
+                  <line x1="732" y1="119" x2="746" y2="119"
+                    stroke={pacEvaluated ? tc : (detailedMode === "Bypass" ? "#e5e7eb" : tc)}
+                    strokeWidth="2" markerEnd="url(#tp3-arr-zia)" className="pointer-events-none"/>
+
+                  {/* ── Context trunk (x=420, vertical) ──────────────────────── */}
+                  <line x1="420" y1="38" x2="420" y2="196" stroke="#e5e7eb" strokeWidth="2"/>
+                  <line x1="420" y1="51" x2="430" y2="51" stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
+                  <line x1="420" y1="113" x2="430" y2="113" stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
+                  <line x1="420" y1="175" x2="430" y2="175" stroke="#d1d5db" strokeWidth="1.5" markerEnd="url(#tp3-arr-gray)"/>
+
+                  {/* ── Context nodes → PAC trunk (x=596) ────────────────────── */}
+                  <line x1="582" y1="51" x2="596" y2="51"
                     stroke={networkContext === "on" ? "#7c3aed" : "#e5e7eb"}
                     strokeWidth={networkContext === "on" ? 2 : 1.5}/>
-                  <line x1="486" y1="108"
-                    x2="510" y2="108"
+                  <line x1="582" y1="113" x2="596" y2="113"
                     stroke={networkContext === "vpn" ? "#4f46e5" : "#e5e7eb"}
                     strokeWidth={networkContext === "vpn" ? 2 : 1.5}/>
-                  <line x1="486" y1="166"
-                    x2="510" y2="166"
+                  <line x1="582" y1="175" x2="596" y2="175"
                     stroke={networkContext === "off" ? tc : "#e5e7eb"}
                     strokeWidth={networkContext === "off" ? 2 : 1.5}/>
 
-                  {/* ── Right fork trunk + branches ───────────────────────────── */}
-                  <line x1="510" y1="38"  x2="510" y2="180" stroke="#e5e7eb" strokeWidth="2"/>
-                  <line x1="510" y1="38"  x2="521" y2="38"
+                  {/* ── PAC trunk (x=596, vertical) ───────────────────────────── */}
+                  <line x1="596" y1="38" x2="596" y2="196" stroke="#e5e7eb" strokeWidth="2"/>
+
+                  {/* ── Dest trunk (x=746, vertical) ──────────────────────────── */}
+                  <line x1="746" y1="22" x2="746" y2="222" stroke="#e5e7eb" strokeWidth="2"/>
+
+                  {/* ── Dest trunk → ZIA ──────────────────────────────────────── */}
+                  <line x1="746" y1="38"  x2="758" y2="38"
                     stroke={tunnelActive || hovered === "zia" ? tc : "#d1d5db"}
                     strokeWidth={tunnelActive ? 2.5 : 1.5}
                     markerEnd="url(#tp3-arr-zia)" className="pointer-events-none"/>
-                  {data.zpaEnabled && (
-                    <line x1="510" y1="97"  x2="521" y2="97"
-                      stroke={ctxZpaOn(networkContext) ? (zpaActive || hovered === "zpa" ? "#4f46e5" : "#a5b4fc") : "#e5e7eb"}
-                      strokeWidth={ctxZpaOn(networkContext) && zpaActive ? 2.5 : 1.5}
-                      strokeDasharray="5,3"
-                      markerEnd="url(#tp3-arr-zpa)" className="pointer-events-none"/>
-                  )}
-                  <line x1="510" y1="180" x2="521" y2="180"
-                    stroke={bypassActive || hovered === "local" ? "#f97316" : "#d1d5db"}
+
+                  {/* ── Dest trunk → ZPA ──────────────────────────────────────── */}
+                  {data.zpaEnabled && (() => {
+                    const zpaCtxOn = ctxZpaOn(networkContext);
+                    return (
+                      <line x1="746" y1="98" x2="758" y2="98"
+                        stroke={zpaCtxOn ? (zpaActive || hovered === "zpa" ? "#4f46e5" : "#a5b4fc") : "#e5e7eb"}
+                        strokeWidth={zpaCtxOn && zpaActive ? 2.5 : 1.5}
+                        strokeDasharray="5,3"
+                        markerEnd="url(#tp3-arr-zpa)" className="pointer-events-none"/>
+                    );
+                  })()}
+
+                  {/* ── Dest trunk → Direct (PAC DIRECT path, shown when PAC evaluated) */}
+                  <line x1="746" y1="220" x2="758" y2="220"
+                    stroke={pacEvaluated ? (bypassActive || hovered === "local" ? "#f97316" : "#fdba74") : "#e5e7eb"}
                     strokeWidth={bypassActive ? 2.5 : 1.5}
                     strokeDasharray="6,4"
                     markerEnd="url(#tp3-arr-local)" className="pointer-events-none"/>
 
+                  {/* ── App Bypass bypass indicator (downward arrow) ──────────── */}
+                  {totalBypassCount > 0 && (
+                    <>
+                      <line x1="163" y1="160" x2="163" y2="182"
+                        stroke="#9ca3af" strokeWidth="1.5" strokeDasharray="3,3"
+                        markerEnd="url(#tp3-arr-bypass)" className="pointer-events-none"/>
+                      <text x="175" y="196" fontSize="7.5" fill="#9ca3af">bypass → Direct</text>
+                    </>
+                  )}
+
                   {/* ── Node: Device ──────────────────────────────────────────── */}
                   <g filter="url(#tp3-shadow)">
-                    <rect x="8" y="86" width="100" height="44" rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
+                    <rect x="8" y="99" width="96" height="44" rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
                   </g>
-                  <rect x="16" y="95" width="18" height="12" rx="1.5" fill="none" stroke="#9ca3af" strokeWidth="1.3"/>
-                  <line x1="13" y1="107" x2="37" y2="107" stroke="#9ca3af" strokeWidth="1.3"/>
-                  <line x1="23" y1="108" x2="27" y2="111" stroke="#9ca3af" strokeWidth="1.3"/>
-                  <text x="40" y="102" fontSize="11" fontWeight="600" fill="#374151">Device</text>
-                  <text x="40" y="115" fontSize="9" fill="#9ca3af">Endpoint</text>
+                  <rect x="16" y="108" width="18" height="12" rx="1.5" fill="none" stroke="#9ca3af" strokeWidth="1.3"/>
+                  <line x1="13" y1="120" x2="37" y2="120" stroke="#9ca3af" strokeWidth="1.3"/>
+                  <line x1="23" y1="121" x2="27" y2="124" stroke="#9ca3af" strokeWidth="1.3"/>
+                  <text x="40" y="115" fontSize="11" fontWeight="600" fill="#374151">Device</text>
+                  <text x="40" y="128" fontSize="9" fill="#9ca3af">Endpoint</text>
 
-                  {/* ── Node: ZCC ─────────────────────────────────────────────── */}
+                  {/* ── Stage 1: App Bypass Filter ────────────────────────────── */}
                   <g filter="url(#tp3-shadow)">
-                    <rect x="136" y="76" width="150" height="64" rx="8" fill="white" stroke="#93c5fd" strokeWidth="1.5"/>
+                    <rect x="116" y="79" width="148" height="81" rx="8" fill="white"
+                      stroke={totalBypassCount > 0 ? "#fb923c" : "#e5e7eb"} strokeWidth="1.5"/>
                   </g>
-                  <path d="M147 105 L147 92 L157 89 L167 92 L167 105 C167 111 157 114 157 114 C157 114 147 111 147 105Z"
+                  {/* Funnel icon */}
+                  <path d="M126 95 L141 95 L134.5 105 L134.5 115 L132.5 115 L132.5 105Z"
+                    fill="none" stroke={totalBypassCount > 0 ? "#f97316" : "#9ca3af"} strokeWidth="1.3"
+                    className="pointer-events-none"/>
+                  <text x="148" y="95" fontSize="10" fontWeight="600"
+                    fill={totalBypassCount > 0 ? "#c2410c" : "#374151"}>App Bypass</text>
+                  {totalBypassCount > 0 ? (
+                    <>
+                      {data.processBypasses.length > 0 && (
+                        <text x="148" y="108" fontSize="8" fill="#6b7280">
+                          {`${data.processBypasses.length} process`}
+                          {data.portBypasses.length > 0 ? ` · ${data.portBypasses.length} port` : ""}
+                        </text>
+                      )}
+                      {data.portBypasses.length > 0 && data.processBypasses.length === 0 && (
+                        <text x="148" y="108" fontSize="8" fill="#6b7280">{`${data.portBypasses.length} port`}</text>
+                      )}
+                      {data.vpnGatewayBypasses.length > 0 && (
+                        <text x="148" y="120" fontSize="8" fill="#6b7280">{`${data.vpnGatewayBypasses.length} VPN gateway`}</text>
+                      )}
+                      <text x="148" y="150" fontSize="7.5" fill="#d1d5db">match → Direct (pre-ZCC)</text>
+                    </>
+                  ) : (
+                    <text x="148" y="113" fontSize="8.5" fill="#9ca3af">No bypass rules</text>
+                  )}
+                  {/* "intercepted →" label above right exit */}
+                  <text x="226" y="98" fontSize="7" fill="#9ca3af" textAnchor="middle">intercepted</text>
+
+                  {/* ── Stage 2: ZCC Forwarding ───────────────────────────────── */}
+                  <g filter="url(#tp3-shadow)">
+                    <rect x="276" y="85" width="132" height="68" rx="8" fill="white" stroke="#93c5fd" strokeWidth="1.5"/>
+                  </g>
+                  <path d="M286 114 L286 101 L296 98 L306 101 L306 114 C306 120 296 123 296 123 C296 123 286 120 286 114Z"
                     fill="none" stroke="#3b82f6" strokeWidth="1.4"/>
-                  <text x="174" y="96" fontSize="11" fontWeight="600" fill="#1d4ed8">ZCC</text>
-                  <text x="174" y="110" fontSize="9" fill="#6b7280">All traffic intercepted</text>
-                  <circle cx="276" cy="84" r="5" fill={data.active ? "#22c55e" : "#d1d5db"}/>
+                  <text x="313" y="103" fontSize="11" fontWeight="600" fill="#1d4ed8">ZCC</text>
+                  <text x="313" y="117" fontSize="8.5" fill="#6b7280">Forwarding Decision</text>
+                  {data.forwardingProfileName && (
+                    <text x="313" y="129" fontSize="7.5" fill="#9ca3af" className="pointer-events-none">
+                      {data.forwardingProfileName.length > 16 ? `${data.forwardingProfileName.slice(0, 15)}…` : data.forwardingProfileName}
+                    </text>
+                  )}
+                  <circle cx="398" cy="91" r="5" fill={data.active ? "#22c55e" : "#d1d5db"}/>
                   {data.deviceType && (
-                    <text x="174" y="124" fontSize="8" fill="#9ca3af">
-                      {`${data.deviceType.charAt(0).toUpperCase()}${data.deviceType.slice(1)} policy`}
+                    <text x="313" y="141" fontSize="7.5" fill="#d1d5db" className="pointer-events-none">
+                      {`${data.deviceType.charAt(0).toUpperCase()}${data.deviceType.slice(1)}`}
                     </text>
                   )}
 
-                  {/* ── 3 Network Context Nodes ───────────────────────────────── */}
-
-                  {/* On Trusted Network (y=27, h=46, center=50) */}
+                  {/* ── Context node: On Trusted Network (y=29, h=44, center=51) */}
                   <g filter="url(#tp3-shadow)" className="cursor-pointer"
                     onClick={() => setNetworkContext("on")}
                     onMouseEnter={() => setHovered("on-node")} onMouseLeave={() => setHovered(null)}>
-                    <rect x="314" y="27" width="172" height="46" rx="7"
+                    <rect x="430" y="29" width="152" height="44" rx="7"
                       fill={networkContext === "on" ? "#faf5ff" : "white"}
                       stroke={networkContext === "on" ? "#7c3aed" : hovered === "on-node" ? "#c4b5fd" : "#e5e7eb"}
                       strokeWidth={networkContext === "on" ? 2 : 1.5}/>
                   </g>
-                  <text x="330" y="46" fontSize="10" fontWeight="600"
+                  <text x="446" y="47" fontSize="10" fontWeight="600"
                     fill={networkContext === "on" ? "#5b21b6" : "#374151"} className="pointer-events-none">
                     On Trusted Network
                   </text>
-                  <text x="330" y="61" fontSize="8"
+                  <text x="446" y="61" fontSize="7.5"
                     fill={networkContext === "on" ? "#7c3aed" : "#9ca3af"} className="pointer-events-none">
-                    {ctxModeStr("on")}{ctxModeStr("on") ? ` · ${ctxTransStr("on")}` : ""}
+                    {ctxModeStr("on")}{ctxDetailedMode("on") === "T2.0+LP" ? " +LP" : ""}{ctxModeStr("on") ? ` · ${ctxTransStr("on")}` : ""}
                   </text>
 
-                  {/* VPN Trusted Network (y=85, h=46, center=108) */}
+                  {/* ── Context node: VPN Trusted (y=91, h=44, center=113) ────── */}
                   <g filter="url(#tp3-shadow)" className="cursor-pointer"
                     onClick={() => setNetworkContext("vpn")}
                     onMouseEnter={() => setHovered("vpn-node")} onMouseLeave={() => setHovered(null)}>
-                    <rect x="314" y="85" width="172" height="46" rx="7"
+                    <rect x="430" y="91" width="152" height="44" rx="7"
                       fill={networkContext === "vpn" ? "#eef2ff" : "white"}
                       stroke={networkContext === "vpn" ? "#4f46e5" : hovered === "vpn-node" ? "#a5b4fc" : "#e5e7eb"}
                       strokeWidth={networkContext === "vpn" ? 2 : 1.5}/>
                   </g>
-                  <text x="330" y="104" fontSize="10" fontWeight="600"
+                  <text x="446" y="109" fontSize="10" fontWeight="600"
                     fill={networkContext === "vpn" ? "#3730a3" : "#374151"} className="pointer-events-none">
                     VPN Trusted Network
                   </text>
-                  <text x="330" y="119" fontSize="8"
+                  <text x="446" y="123" fontSize="7.5"
                     fill={networkContext === "vpn" ? "#4f46e5" : "#9ca3af"} className="pointer-events-none">
-                    {ctxModeStr("vpn")}{ctxModeStr("vpn") ? ` · ${ctxTransStr("vpn")}` : ""}
+                    {ctxModeStr("vpn")}{ctxDetailedMode("vpn") === "T2.0+LP" ? " +LP" : ""}{ctxModeStr("vpn") ? ` · ${ctxTransStr("vpn")}` : ""}
                   </text>
 
-                  {/* Off Trusted Network (y=143, h=46, center=166) */}
+                  {/* ── Context node: Off Trusted (y=153, h=44, center=175) ───── */}
                   <g filter="url(#tp3-shadow)" className="cursor-pointer"
                     onClick={() => setNetworkContext("off")}
                     onMouseEnter={() => setHovered("off-node")} onMouseLeave={() => setHovered(null)}>
-                    <rect x="314" y="143" width="172" height="46" rx="7"
+                    <rect x="430" y="153" width="152" height="44" rx="7"
                       fill={networkContext === "off"
                         ? (data.tunnelMode === "Z-Tunnel 2.0" ? "#f0fdf4" : data.tunnelMode === "Proxy" ? "#fefce8" : "#eff6ff")
                         : "white"}
                       stroke={networkContext === "off" ? tc : hovered === "off-node" ? "#d1d5db" : "#e5e7eb"}
                       strokeWidth={networkContext === "off" ? 2 : 1.5}/>
                   </g>
-                  <text x="330" y="162" fontSize="10" fontWeight="600" fill="#374151" className="pointer-events-none">
+                  <text x="446" y="171" fontSize="10" fontWeight="600" fill="#374151" className="pointer-events-none">
                     Off Trusted Network
                   </text>
-                  <text x="330" y="176" fontSize="8"
+                  <text x="446" y="185" fontSize="7.5"
                     fill={networkContext === "off" ? "#6b7280" : "#9ca3af"} className="pointer-events-none">
-                    {ctxModeStr("off")}{ctxModeStr("off") ? ` · ${ctxTransStr("off")}` : ""}
+                    {ctxModeStr("off")}{ctxDetailedMode("off") === "T2.0+LP" ? " +LP" : ""}{ctxModeStr("off") ? ` · ${ctxTransStr("off")}` : ""}
                   </text>
 
-                  {/* ── Right side: ZIA Cloud (always visible) ───────────────── */}
+                  {/* ── Stage 3: PAC Decision ─────────────────────────────────── */}
+                  <g filter="url(#tp3-shadow)">
+                    <rect x="604" y="76" width="128" height="86" rx="8" fill="white"
+                      stroke={pacEvaluated ? "#fbbf24" : (detailedMode === "Bypass" ? "#e5e7eb" : "#86efac")}
+                      strokeWidth="1.5"/>
+                  </g>
+                  {pacEvaluated ? (
+                    <>
+                      <text x="619" y="92" fontSize="9.5" fontWeight="600" fill="#92400e">PAC Evaluated</text>
+                      {detailedMode === "T2.0+LP" ? (
+                        <>
+                          <text x="619" y="106" fontSize="7.5" fill="#6b7280">Web: PAC PROXY → ZIA</text>
+                          <text x="619" y="117" fontSize="7.5" fill="#9ca3af">Web: PAC DIRECT → local</text>
+                          <text x="619" y="128" fontSize="7.5" fill="#6b7280">Non-web → ZIA</text>
+                          <text x="619" y="142" fontSize="7" fill="#d1d5db">Z-Tunnel 2.0 + Listening Proxy</text>
+                        </>
+                      ) : (
+                        <>
+                          <text x="619" y="106" fontSize="7.5" fill="#6b7280">PAC PROXY → ZIA</text>
+                          <text x="619" y="117" fontSize="7.5" fill="#9ca3af">PAC DIRECT → local</text>
+                          <text x="619" y="131" fontSize="7" fill="#d1d5db">
+                            {detailedMode === "T1.0" ? "Z-Tunnel 1.0" : "Proxy"}
+                          </text>
+                        </>
+                      )}
+                    </>
+                  ) : detailedMode === "Bypass" ? (
+                    <>
+                      <text x="619" y="92" fontSize="9.5" fontWeight="600" fill="#374151">ZCC Bypassed</text>
+                      <text x="619" y="106" fontSize="8" fill="#9ca3af">No ZCC processing</text>
+                      <text x="619" y="118" fontSize="8" fill="#9ca3af">for this context</text>
+                    </>
+                  ) : (
+                    <>
+                      <text x="619" y="92" fontSize="9.5" fontWeight="600" fill="#15803d">PAC Skipped</text>
+                      <text x="619" y="106" fontSize="7.5" fill="#6b7280">All traffic → ZIA</text>
+                      <text x="619" y="117" fontSize="7.5" fill="#9ca3af">(PAC file ignored)</text>
+                      <text x="619" y="131" fontSize="7" fill="#d1d5db">Z-Tunnel 2.0 (no LP)</text>
+                    </>
+                  )}
+
+                  {/* ── Destination: ZIA Cloud ────────────────────────────────── */}
                   <g filter="url(#tp3-shadow)" className="cursor-pointer"
                     onClick={() => setActiveSection(tabs.find(t => t.group === "zia")?.key ?? "tunnel")}
                     onMouseEnter={() => setHovered("zia")} onMouseLeave={() => setHovered(null)}>
-                    <rect x="524" y="14" width="296" height="48" rx="8"
+                    <rect x="758" y="14" width="228" height="48" rx="8"
                       fill={tunnelActive || hovered === "zia" ? "#f0fdf4" : "white"}
                       stroke={tunnelActive ? tc : "#86efac"}
                       strokeWidth={tunnelActive ? 2 : 1.5}/>
                   </g>
-                  <path d="M533 44 C530 44 529 41 531 38 C529 36 530 33 534 32 C534 28 539 25 544 27 C545 24 551 23 554 26 C559 24 564 28 562 33 C565 33 567 36 565 39 C566 42 564 45 561 45Z"
+                  <path d="M767 43 C764 43 763 40 765 37 C763 35 764 32 768 31 C768 27 773 24 778 26 C779 23 785 22 788 25 C793 23 798 27 796 32 C799 32 801 35 799 38 C800 41 798 44 795 44Z"
                     fill="none" stroke="#22c55e" strokeWidth="1.2" className="pointer-events-none"/>
-                  <text x="571" y="30" fontSize="10" fontWeight="600" fill="#15803d" className="pointer-events-none">ZIA Cloud</text>
-                  <text x="571" y="45" fontSize="8.5" fill="#6b7280" className="pointer-events-none">
-                    {ZIA_MODE_LABEL[data.tunnelMode]}
+                  <text x="805" y="30" fontSize="10" fontWeight="600" fill="#15803d" className="pointer-events-none">ZIA Cloud</text>
+                  <text x="805" y="44" fontSize="8" fill="#6b7280" className="pointer-events-none">
+                    {pacEvaluated ? "PAC PROXY path" : ZIA_MODE_LABEL[data.tunnelMode]}
                   </text>
                   {(data.pac.enablePac || data.pac.url) && (
                     <g className="cursor-pointer" onClick={(e) => { e.stopPropagation(); setActiveSection("pac"); }}>
-                      <rect x="788" y="16" width="30" height="16" rx="4" fill="#fef3c7" stroke="#fbbf24" strokeWidth="1"/>
-                      <text x="803" y="27" fontSize="8" fontWeight="600" fill="#92400e" textAnchor="middle" className="pointer-events-none">PAC</text>
+                      <rect x="956" y="16" width="26" height="14" rx="4" fill="#fef3c7" stroke="#fbbf24" strokeWidth="1"/>
+                      <text x="969" y="26" fontSize="7.5" fontWeight="600" fill="#92400e" textAnchor="middle" className="pointer-events-none">PAC</text>
                     </g>
                   )}
 
-                  {/* ── Right side: ZPA (always visible when enabled) ────────── */}
+                  {/* ── Destination: ZPA ──────────────────────────────────────── */}
                   {data.zpaEnabled && (() => {
                     const zpaCtxOn = ctxZpaOn(networkContext);
                     const zpaBorderColor = zpaCtxOn ? (zpaActive ? "#4f46e5" : "#a5b4fc") : "#d1d5db";
@@ -7060,56 +7202,53 @@ function AppProfileVisualizer({
                       <g filter="url(#tp3-shadow)" className="cursor-pointer"
                         onClick={() => setActiveSection("zpa")}
                         onMouseEnter={() => setHovered("zpa")} onMouseLeave={() => setHovered(null)}>
-                        <rect x="524" y="73" width="296" height="48" rx="8"
+                        <rect x="758" y="74" width="228" height="48" rx="8"
                           fill={zpaCtxOn && (zpaActive || hovered === "zpa") ? "#eef2ff" : "white"}
                           stroke={zpaBorderColor}
                           strokeWidth={zpaCtxOn && zpaActive ? 2 : 1.5}
                           strokeDasharray="5,3"/>
-                        <rect x="533" y="89" width="14" height="11" rx="2" fill="none" stroke={zpaIconColor} strokeWidth="1.3"/>
-                        <path d="M536 89 A4 4 0 0 1 544 89" fill="none" stroke={zpaIconColor} strokeWidth="1.3"/>
-                        <circle cx="540" cy="95" r="1.5" fill={zpaIconColor}/>
-                        <text x="554" y="91" fontSize="10" fontWeight="600" fill={zpaLabelColor}>ZPA Private Apps</text>
-                        <text x="554" y="106" fontSize="8.5" fill={zpaCtxOn ? "#6b7280" : "#d1d5db"}>ZPA-enrolled private access</text>
-                        {zpaCtxOn && (
-                          <rect x="784" y="75" width="34" height="15" rx="4" fill="#eef2ff" stroke="#a5b4fc" strokeWidth="0.8"/>
-                        )}
-                        {zpaCtxOn && (
-                          <text x="801" y="85" fontSize="7.5" fill="#4f46e5" textAnchor="middle" className="pointer-events-none">active</text>
-                        )}
-                        {!zpaCtxOn && (
-                          <text x="801" y="85" fontSize="7.5" fill="#d1d5db" textAnchor="middle" className="pointer-events-none">off</text>
-                        )}
+                        <rect x="767" y="90" width="14" height="11" rx="2" fill="none" stroke={zpaIconColor} strokeWidth="1.3"/>
+                        <path d="M770 90 A4 4 0 0 1 778 90" fill="none" stroke={zpaIconColor} strokeWidth="1.3"/>
+                        <circle cx="774" cy="96" r="1.5" fill={zpaIconColor}/>
+                        <text x="789" y="92" fontSize="10" fontWeight="600" fill={zpaLabelColor}>ZPA Private Apps</text>
+                        <text x="789" y="106" fontSize="8" fill={zpaCtxOn ? "#6b7280" : "#d1d5db"}>ZPA-enrolled private access</text>
+                        {zpaCtxOn && <rect x="952" y="76" width="30" height="13" rx="4" fill="#eef2ff" stroke="#a5b4fc" strokeWidth="0.8"/>}
+                        {zpaCtxOn && <text x="967" y="86" fontSize="7" fill="#4f46e5" textAnchor="middle" className="pointer-events-none">active</text>}
+                        {!zpaCtxOn && <text x="967" y="86" fontSize="7" fill="#d1d5db" textAnchor="middle" className="pointer-events-none">off</text>}
                       </g>
                     );
                   })()}
 
-                  {/* ── Right side: Local / Direct (always visible) ──────────── */}
+                  {/* ── Destination: Local / Direct ───────────────────────────── */}
                   <g filter="url(#tp3-shadow)" className="cursor-pointer"
                     onClick={() => setActiveSection(tabs.find(t => t.group === "bypass")?.key ?? "process")}
                     onMouseEnter={() => setHovered("local")} onMouseLeave={() => setHovered(null)}>
-                    <rect x="524" y="156" width="296" height="48" rx="8"
+                    <rect x="758" y="196" width="228" height="48" rx="8"
                       fill={bypassActive || hovered === "local" ? "#fff7ed" : "white"}
-                      stroke={bypassActive ? "#f97316" : "#fdba74"}
+                      stroke={pacEvaluated ? (bypassActive ? "#f97316" : "#fdba74") : "#e5e7eb"}
                       strokeWidth={bypassActive ? 2 : 1.5}
                       strokeDasharray="5,3"/>
                   </g>
-                  <circle cx="538" cy="180" r="9" fill="none" stroke="#f97316" strokeWidth="1.3" className="pointer-events-none"/>
-                  <ellipse cx="538" cy="180" rx="4.5" ry="9" fill="none" stroke="#f97316" strokeWidth="1" className="pointer-events-none"/>
-                  <line x1="529" y1="180" x2="547" y2="180" stroke="#f97316" strokeWidth="1" className="pointer-events-none"/>
-                  <text x="555" y="175" fontSize="10" fontWeight="600" fill="#c2410c" className="pointer-events-none">Local / Direct</text>
-                  <text x="555" y="189" fontSize="8" fill="#6b7280" className="pointer-events-none">{localSubtitle}</text>
+                  <circle cx="772" cy="220" r="9" fill="none" stroke={pacEvaluated ? "#f97316" : "#d1d5db"} strokeWidth="1.3" className="pointer-events-none"/>
+                  <ellipse cx="772" cy="220" rx="4.5" ry="9" fill="none" stroke={pacEvaluated ? "#f97316" : "#d1d5db"} strokeWidth="1" className="pointer-events-none"/>
+                  <line x1="763" y1="220" x2="781" y2="220" stroke={pacEvaluated ? "#f97316" : "#d1d5db"} strokeWidth="1" className="pointer-events-none"/>
+                  <text x="789" y="215" fontSize="10" fontWeight="600"
+                    fill={pacEvaluated ? "#c2410c" : "#9ca3af"} className="pointer-events-none">Local / Direct</text>
+                  <text x="789" y="229" fontSize="8" fill="#6b7280" className="pointer-events-none">{localSubtitle}</text>
 
-                  {/* Legend */}
-                  <circle cx="10" cy="207" r="4" fill={data.active ? "#22c55e" : "#d1d5db"}/>
-                  <text x="18" y="211" fontSize="8.5" fill="#9ca3af">{data.active ? "Active" : "Inactive"}</text>
-                  <line x1="64" y1="207" x2="78" y2="207" stroke={tc} strokeWidth="2"/>
-                  <text x="82" y="211" fontSize="8.5" fill="#9ca3af">ZIA tunnel</text>
-                  <line x1="130" y1="207" x2="144" y2="207" stroke="#f97316" strokeWidth="2" strokeDasharray="4,3"/>
-                  <text x="148" y="211" fontSize="8.5" fill="#9ca3af">Local/direct</text>
+                  {/* ── Legend ────────────────────────────────────────────────── */}
+                  <circle cx="10" cy="260" r="4" fill={data.active ? "#22c55e" : "#d1d5db"}/>
+                  <text x="18" y="264" fontSize="8.5" fill="#9ca3af">{data.active ? "Active" : "Inactive"}</text>
+                  <line x1="64" y1="260" x2="78" y2="260" stroke={tc} strokeWidth="2"/>
+                  <text x="82" y="264" fontSize="8.5" fill="#9ca3af">ZIA tunnel</text>
+                  <line x1="130" y1="260" x2="144" y2="260" stroke="#f97316" strokeWidth="2" strokeDasharray="4,3"/>
+                  <text x="148" y="264" fontSize="8.5" fill="#9ca3af">
+                    {pacEvaluated ? "PAC DIRECT" : "Local/direct"}
+                  </text>
                   {data.zpaEnabled && (
                     <>
-                      <line x1="210" y1="207" x2="224" y2="207" stroke="#4f46e5" strokeWidth="2" strokeDasharray="5,3"/>
-                      <text x="228" y="211" fontSize="8.5" fill="#9ca3af">ZPA</text>
+                      <line x1="220" y1="260" x2="234" y2="260" stroke="#4f46e5" strokeWidth="2" strokeDasharray="5,3"/>
+                      <text x="238" y="264" fontSize="8.5" fill="#9ca3af">ZPA</text>
                     </>
                   )}
                 </svg>

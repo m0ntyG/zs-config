@@ -60,6 +60,22 @@ def _derive_tunnel_mode(raw_fp: Optional[Dict]) -> str:
     return "Z-Tunnel 1.0"
 
 
+def _detect_listening_proxy(raw_fp: Optional[Dict]) -> bool:
+    """Return True when Z-Tunnel 2.0 is active together with a listening proxy."""
+    if not raw_fp:
+        return False
+    actions = (raw_fp.get("forwardingProfileActions") or
+               raw_fp.get("forwarding_profile_actions") or [])
+    if not actions:
+        return False
+    first = actions[0] if isinstance(actions[0], dict) else {}
+    if not (first.get("enablePacketTunnel") or first.get("enable_packet_tunnel")):
+        return False
+    spd = first.get("systemProxyData") or first.get("system_proxy_data") or {}
+    sys_proxy = first.get("systemProxy") or first.get("system_proxy") or 0
+    return int(sys_proxy) == 2 or bool(spd.get("enableProxyServer") or spd.get("enable_proxy_server"))
+
+
 def _detect_zpa(raw_fp: Optional[Dict]) -> bool:
     """Return True when the forwarding profile indicates ZPA access is configured.
 
@@ -152,8 +168,9 @@ def _build_traffic_profile(
     fp_id = str(raw_policy.get("forwardingProfileId", "")) or None
     tunnel_mode = _derive_tunnel_mode(raw_fp)
 
-    # ZPA detection
+    # ZPA and listening-proxy detection
     zpa_enabled = _detect_zpa(raw_fp)
+    listening_proxy = _detect_listening_proxy(raw_fp)
 
     # PAC config
     pac_url = raw_policy.get("pac_url") or raw_policy.get("pacUrl") or None
@@ -266,6 +283,7 @@ def _build_traffic_profile(
         "tunnelZappTraffic": bool(raw_policy.get("tunnelZappTraffic")),
         "trustedNetworks": trusted_networks,
         "zpaEnabled": zpa_enabled,
+        "listeningProxy": listening_proxy,
         "deviceType": device_type,
         "targetUsers": target_users,
         "targetGroups": target_groups,

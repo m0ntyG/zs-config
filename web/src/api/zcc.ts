@@ -234,6 +234,7 @@ export interface TrafficProfile {
   tunnelZappTraffic: boolean;
   trustedNetworks: string[];
   zpaEnabled: boolean;
+  listeningProxy: boolean;
   deviceType: string | null;
   targetUsers: PolicyTarget[];
   targetGroups: PolicyTarget[];
