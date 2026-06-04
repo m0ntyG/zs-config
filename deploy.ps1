@@ -300,8 +300,10 @@ function Ensure-VM {
     $OsDisk = Join-Path $VmDiskDir "os.vhdx"
     Write-Host "Copying VHDX to $OsDisk..."
     Copy-Item $vhdx $OsDisk -Force
-    Resize-VHD -Path $OsDisk -SizeBytes 42949672960
+    # Patch GRUB before resizing: Resize-VHD moves the secondary GPT header,
+    # which makes Get-Partition unreliable when the disk is remounted afterward.
     Fix-CloudInitDatasource -OsDisk $OsDisk
+    Resize-VHD -Path $OsDisk -SizeBytes 42949672960
 
     Remove-Item $tgz, $vhdx -ErrorAction SilentlyContinue
     Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -325,6 +327,10 @@ function Ensure-VM {
     Set-VMFirmware  -VMName "zs-config-host" -EnableSecureBoot Off
 
     Set-VM -VMName "zs-config-host" -CheckpointType Disabled
+
+    # Remove the empty DVD drive Hyper-V may add by default (shows as /dev/sr0 in Linux).
+    Get-VMDvdDrive -VMName "zs-config-host" -ErrorAction SilentlyContinue |
+        Remove-VMDvdDrive -ErrorAction SilentlyContinue
 
     # Attach seed disk as a SCSI hard disk (/dev/sdb inside the VM).
     # A DVD-backed ISO would appear on /dev/sr0 which fails with
