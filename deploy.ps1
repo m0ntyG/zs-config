@@ -192,6 +192,97 @@ function Remove-StaleVm {
     Remove-VM -Name "zs-config-host" -Force
 }
 
+function Fix-CloudInitDatasource {
+    param([string]$OsDisk)
+    # The Ubuntu Azure cloud image ships with datasource_list: [Azure] only.
+    # On non-Azure Hyper-V cloud-init never finds our seed disk.
+    # Fix: patch the ESP's grub.cfg to pass ds=nocloud on the kernel command line,
+    # which forces cloud-init to use NoCloud regardless of the image's datasource_list.
+    Write-Host "Patching GRUB to force NoCloud datasource (ds=nocloud)..."
+
+    $diskNum    = $null
+    $espPartNum = $null
+    $tmpLetter  = $null
+
+    try {
+        $vhdDisk = Mount-VHD -Path $OsDisk -PassThru
+        $diskNum = $vhdDisk.DiskNumber
+        Start-Sleep -Seconds 2
+
+        $parts   = Get-Partition -DiskNumber $diskNum -ErrorAction Stop
+        $EspGuid = "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
+
+        $espPart = $parts | Where-Object { $_.GptType -eq $EspGuid } | Select-Object -First 1
+        if (-not $espPart) {
+            Write-Host "Warning: EFI System Partition not found; skipping GRUB patch."
+            return
+        }
+
+        $used      = (Get-PSDrive -PSProvider FileSystem).Name
+        $available = [char[]](70..90) | Where-Object { ([string]$_) -notin $used }
+        if (-not $available) {
+            Write-Host "Warning: No free drive letters; skipping GRUB patch."
+            return
+        }
+        $tmpLetter  = [char]$available[0]
+        $espPartNum = $espPart.PartitionNumber
+        Set-Partition -DiskNumber $diskNum -PartitionNumber $espPartNum -NewDriveLetter $tmpLetter
+        Start-Sleep -Seconds 1
+        $espDrive = "${tmpLetter}:"
+
+        $grubDir = Join-Path $espDrive "EFI\ubuntu"
+        if (-not (Test-Path $grubDir)) {
+            Write-Host "Warning: EFI\ubuntu not found on ESP; skipping GRUB patch."
+            return
+        }
+
+        $grubCfgPath = Join-Path $grubDir "grub.cfg"
+
+        # Read existing grub.cfg to extract the ext4 filesystem UUID so we can
+        # continue to use search.fs_uuid (built into GRUB core, no insmod needed).
+        $existing = Get-Content $grubCfgPath -Raw -ErrorAction SilentlyContinue
+        $fsUuid   = $null
+        if ($existing -match 'search\.fs_uuid\s+([0-9a-fA-F-]+)\s+root') {
+            $fsUuid = $Matches[1].ToLower()
+        }
+
+        if ($fsUuid) {
+            $searchLine = "search.fs_uuid $fsUuid root"
+            $rootSpec   = "root=UUID=$fsUuid"
+        } else {
+            # Fallback: use GPT partition entry GUID (PARTUUID) of the largest non-system partition.
+            $MsrGuid  = "{e3c9e316-0b5c-4db8-817d-f92df00215ae}"
+            $rootPart = $parts |
+                        Where-Object { $_.GptType -ne $EspGuid -and $_.GptType -ne $MsrGuid } |
+                        Sort-Object Size -Descending | Select-Object -First 1
+            if (-not $rootPart -or -not $rootPart.Guid) {
+                Write-Host "Warning: Could not determine root partition identifier; skipping GRUB patch."
+                return
+            }
+            $rootPartuuid = $rootPart.Guid.TrimStart('{').TrimEnd('}').ToLower()
+            $searchLine   = "search --no-floppy --part-uuid --set=root $rootPartuuid"
+            $rootSpec     = "root=PARTUUID=$rootPartuuid"
+        }
+
+        $grubCfg = "$searchLine`n" +
+                   "linux (`$root)/boot/vmlinuz $rootSpec ro quiet ds=nocloud`n" +
+                   "initrd (`$root)/boot/initrd.img`n" +
+                   "boot"
+
+        [System.IO.File]::WriteAllText($grubCfgPath, $grubCfg, [System.Text.Encoding]::ASCII)
+        Write-Host "GRUB patched: kernel will boot with ds=nocloud."
+
+    } catch {
+        Write-Host "Warning: GRUB patch failed: $_"
+    } finally {
+        if ($null -ne $diskNum -and $null -ne $espPartNum -and $null -ne $tmpLetter) {
+            Remove-PartitionAccessPath -DiskNumber $diskNum -PartitionNumber $espPartNum `
+                -AccessPath "${tmpLetter}:\" -ErrorAction SilentlyContinue
+        }
+        Dismount-VHD -Path $OsDisk -ErrorAction SilentlyContinue
+    }
+}
+
 function Ensure-VM {
     param([string]$SshPublicKey)
 
@@ -236,6 +327,7 @@ function Ensure-VM {
     Write-Host "Copying VHDX to $OsDisk..."
     Copy-Item $vhdx $OsDisk -Force
     Resize-VHD -Path $OsDisk -SizeBytes 42949672960
+    Fix-CloudInitDatasource -OsDisk $OsDisk
 
     Remove-Item $tgz, $vhdx -ErrorAction SilentlyContinue
     Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -262,9 +354,9 @@ function Ensure-VM {
 
     if ($SeedIso -like "*.iso") {
         Add-VMDvdDrive -VMName "zs-config-host" -Path $SeedIso
-        $dvd  = Get-VMDvdDrive     -VMName "zs-config-host"
-        $disk = Get-VMHardDiskDrive -VMName "zs-config-host"
-        Set-VMFirmware -VMName "zs-config-host" -BootOrder @($dvd, $disk)
+        $dvd  = Get-VMDvdDrive      -VMName "zs-config-host"
+        $disk = Get-VMHardDiskDrive -VMName "zs-config-host" | Select-Object -First 1
+        Set-VMFirmware -VMName "zs-config-host" -BootOrder @($disk, $dvd)
     } else {
         # FAT-VHD fallback: attach as a SCSI hard disk; cloud-init reads any FAT disk labeled cidata
         Add-VMHardDiskDrive -VMName "zs-config-host" -Path $SeedIso
