@@ -100,19 +100,20 @@ function New-SeedIso {
         "    ssh_authorized_keys:`n" +
         "      - $SshPublicKey`n" +
         "`n" +
+        "bootcmd:`n" +
+        "  - systemctl enable --now ssh`n" +
+        "`n" +
         "package_update: true`n" +
         "package_upgrade: false`n" +
         "packages:`n" +
         "  - docker.io`n" +
         "  - docker-compose-v2`n" +
-        "  - openssh-server`n" +
         "  - curl`n" +
         "  - git`n" +
         "`n" +
         "runcmd:`n" +
         "  - systemctl enable --now docker`n" +
-        "  - usermod -aG docker zsadmin`n" +
-        "  - systemctl enable --now ssh"
+        "  - usermod -aG docker zsadmin"
 
     # Try IMAPI2 first
     try {
@@ -280,7 +281,7 @@ function Wait-ForVmIp {
 }
 
 function Wait-ForSsh {
-    param([string]$Ip, [int]$TimeoutSeconds = 120)
+    param([string]$Ip, [int]$TimeoutSeconds = 600)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         try {
