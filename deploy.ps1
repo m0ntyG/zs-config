@@ -457,12 +457,130 @@ if (Test-IsWindowsServer) {
     exit $LASTEXITCODE
 }
 
-# -- Preflight ------------------------------------------------------------------
+# -- Desktop (Windows 11) helpers -----------------------------------------------
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Error "ERROR: docker is not installed or not in PATH."
+function Test-CpuVirtualization {
+    $virt = (Get-WmiObject Win32_Processor | Select-Object -First 1).VirtualizationFirmwareEnabled
+    if ($virt) { return }
+    Write-Host ""
+    Write-Host "ERROR: Hardware virtualization is not enabled on this system."
+    Write-Host ""
+    Write-Host "Docker Desktop requires Intel VT-x or AMD-V (SVM) to be enabled"
+    Write-Host "in your BIOS/UEFI firmware."
+    Write-Host ""
+    Write-Host "  1. Restart and enter BIOS/UEFI setup (Del, F2, or F10 at boot)."
+    Write-Host "  2. Locate 'Virtualization Technology', 'VT-x', or 'AMD-V' and enable it."
+    Write-Host "  3. Save settings and restart, then re-run this script."
+    Write-Host ""
+    Write-Host "If this machine is itself a VM, enable nested virtualization on the host."
     exit 1
 }
+
+function Wait-ForDockerDaemon {
+    param([int]$TimeoutSeconds = 120)
+    Write-Host "Waiting for Docker Desktop to become ready..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $null = docker info 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-Host "Docker is ready."; return }
+        Write-Host -NoNewline "."
+        Start-Sleep -Seconds 3
+    }
+    Write-Host ""
+    throw "Docker Desktop did not become ready within ${TimeoutSeconds}s. Start it manually and re-run."
+}
+
+function Ensure-DockerDesktop {
+    # Already installed and running?
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $null = docker info 2>&1
+        if ($LASTEXITCODE -eq 0) { return }
+    }
+
+    $ddExe = "${env:ProgramFiles}\Docker\Docker\Docker Desktop.exe"
+
+    # Installed but daemon not running?
+    if ((Get-Command docker -ErrorAction SilentlyContinue) -and (Test-Path $ddExe)) {
+        Write-Host "Docker Desktop is installed but not running. Starting..."
+        Start-Process $ddExe
+        Write-Host ""
+        Wait-ForDockerDaemon
+        return
+    }
+
+    # Not installed - admin required for installation.
+    $id  = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pri = New-Object Security.Principal.WindowsPrincipal($id)
+    if (-not $pri.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Error ("Docker Desktop is not installed. " +
+                     "Re-run this script as Administrator to install it automatically.")
+        exit 1
+    }
+
+    Write-Host "Docker Desktop not found. Installing..."
+
+    # Prefer winget (ships with Windows 11).
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "Installing via winget..."
+        winget install Docker.DockerDesktop `
+            --silent --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -eq 0) {
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                        [System.Environment]::GetEnvironmentVariable("Path","User")
+        } else {
+            Write-Warning "winget exited $LASTEXITCODE; falling back to direct download."
+        }
+    }
+
+    # Direct download fallback.
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        # Architecture: 12 = ARM64, everything else treated as amd64.
+        $cpuArch = (Get-WmiObject Win32_Processor | Select-Object -First 1).Architecture
+        $archStr = if ($cpuArch -eq 12) { "arm64" } else { "amd64" }
+        $installer = Join-Path $env:TEMP "DockerDesktopInstaller.exe"
+        Write-Host "Downloading Docker Desktop ($archStr)..."
+        Invoke-WebRequest `
+            -Uri "https://desktop.docker.com/win/main/$archStr/Docker%20Desktop%20Installer.exe" `
+            -OutFile $installer -UseBasicParsing
+        Write-Host "Running installer (this may take a few minutes)..."
+        Start-Process -FilePath $installer -ArgumentList "install","--quiet","--accept-license" -Wait
+        Remove-Item $installer -ErrorAction SilentlyContinue
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path","User")
+    }
+
+    if (-not (Test-Path $ddExe)) {
+        Write-Error ("Docker Desktop installation failed. " +
+                     "Install manually from https://docs.docker.com/desktop/install/windows-install/")
+        exit 1
+    }
+
+    # If WSL2 kernel or Virtual Machine Platform was just enabled, a reboot is required.
+    $rebootPending = Test-Path `
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+    if (-not $rebootPending) {
+        $pendingOps = (Get-ItemProperty `
+            "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" `
+            -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+        $rebootPending = ($null -ne $pendingOps -and $pendingOps.Count -gt 0)
+    }
+    if ($rebootPending) {
+        Write-Host ""
+        Write-Host "Docker Desktop was installed but a system restart is required"
+        Write-Host "(WSL2 kernel or Virtual Machine Platform was updated)."
+        Write-Host "Restart, then re-run this script."
+        exit 0
+    }
+
+    Start-Process $ddExe
+    Write-Host ""
+    Wait-ForDockerDaemon
+}
+
+# -- Preflight ------------------------------------------------------------------
+
+Test-CpuVirtualization
+Ensure-DockerDesktop
 
 try {
     docker compose version | Out-Null
