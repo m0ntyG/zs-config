@@ -491,16 +491,17 @@ function Wait-ForDockerDaemon {
 }
 
 function Ensure-DockerDesktop {
-    # Already installed and running?
+    $ddExe = "${env:ProgramFiles}\Docker\Docker\Docker Desktop.exe"
+
+    # Daemon already running?
     if (Get-Command docker -ErrorAction SilentlyContinue) {
         $null = docker info 2>&1
         if ($LASTEXITCODE -eq 0) { return }
     }
 
-    $ddExe = "${env:ProgramFiles}\Docker\Docker\Docker Desktop.exe"
-
-    # Installed but daemon not running?
-    if ((Get-Command docker -ErrorAction SilentlyContinue) -and (Test-Path $ddExe)) {
+    # Installed but not started? Use Test-Path rather than Get-Command docker so
+    # this works even when docker.exe is not yet in the current session's PATH.
+    if (Test-Path $ddExe) {
         Write-Host "Docker Desktop is installed but not running. Starting..."
         Start-Process $ddExe
         Write-Host ""
@@ -524,16 +525,13 @@ function Ensure-DockerDesktop {
         Write-Host "Installing via winget..."
         winget install Docker.DockerDesktop `
             --silent --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -eq 0) {
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path","User")
-        } else {
-            Write-Warning "winget exited $LASTEXITCODE; falling back to direct download."
-        }
+        # Refresh PATH regardless of exit code; winget may have partially succeeded.
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path","User")
     }
 
-    # Direct download fallback.
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    # Direct download fallback if winget was unavailable or did not install the exe.
+    if (-not (Test-Path $ddExe)) {
         # Architecture: 12 = ARM64, everything else treated as amd64.
         $cpuArch = (Get-WmiObject Win32_Processor | Select-Object -First 1).Architecture
         $archStr = if ($cpuArch -eq 12) { "arm64" } else { "amd64" }
