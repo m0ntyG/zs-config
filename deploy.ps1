@@ -577,9 +577,34 @@ function Ensure-DockerDesktop {
     Wait-ForDockerDaemon
 }
 
+function Ensure-Git {
+    if (Get-Command git -ErrorAction SilentlyContinue) { return }
+
+    $id  = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pri = New-Object Security.Principal.WindowsPrincipal($id)
+    if (-not $pri.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Error ("Git is not installed. " +
+                     "Re-run this script as Administrator to install it automatically.")
+        exit 1
+    }
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "Git not found. Installing via winget..."
+        winget install Git.Git --silent --accept-package-agreements --accept-source-agreements
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path","User")
+    }
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Error "Git is not installed. Install from https://git-scm.com/ and re-run this script."
+        exit 1
+    }
+}
+
 # -- Preflight ------------------------------------------------------------------
 
 Test-CpuVirtualization
+Ensure-Git
 Ensure-DockerDesktop
 
 try {
