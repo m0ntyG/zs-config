@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased] - 3.3.3
+
+### Added
+
+- **Scheduled import tasks** — new `task_type = "import"` scheduled task runs ZIA, ZPA, and/or ZCC imports against a single tenant on a cron schedule. Supports multi-product selection; no diff, push, or activation is performed. Useful for keeping the local DB cache current without any mutation risk.
+- **One-to-many sync fan-out** — sync tasks now support `target_tenant_ids` (a list of target tenants) in addition to the existing single-target mode. Each target runs the full import→diff→push pipeline independently with its own ordering context. Run history records one row per target plus a parent rollup row with aggregated status and resource counts.
+
+---
+
 ## [3.3.2] - 2026-06-05
 
 ### Fixed
