@@ -54,6 +54,8 @@ def _fetch_pac_bypasses(pac_url: str, timeout: int = 4) -> List[Dict]:
     """
     if not pac_url or not pac_url.startswith("http"):
         return []
+    # PAC URLs originate from Zscaler cloud configuration — treat as trusted.
+    # If this assumption changes, validate that the host resolves to a public IP.
     try:
         req = urllib.request.Request(pac_url, headers={"User-Agent": "zs-config/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -101,10 +103,10 @@ def _fetch_pac_bypasses(pac_url: str, timeout: int = 4) -> List[Dict]:
                 r"192\.88\.99": "192.88.99.0/24",
             }
             found: List[str] = []
-            cidr_seen2: set = set()
+            cidr_seen_rfc: set = set()
             for pat, cidr in _rfc_map.items():
-                if re.search(re.escape(pat).replace(r"\\", "\\"), regex_body) and cidr not in cidr_seen2:
-                    cidr_seen2.add(cidr)
+                if pat in regex_body and cidr not in cidr_seen_rfc:
+                    cidr_seen_rfc.add(cidr)
                     found.append(cidr)
             label = "RFC1918 private IPs → DIRECT"
             detail = ", ".join(found) if found else regex_body[:80]
@@ -146,10 +148,11 @@ def _fetch_pac_bypasses(pac_url: str, timeout: int = 4) -> List[Dict]:
             _add(f"{pattern} → DIRECT", "shExpMatch")
 
     # ── 5. isPlainHostName → DIRECT ──────────────────────────────────────────
-    if re.search(r"isPlainHostName\s*\(", content_nc):
-        ctx_near = content_nc[content_nc.find("isPlainHostName"):][:300]
-        if "DIRECT" in ctx_near:
+    for m in re.finditer(r"isPlainHostName\s*\(", content_nc):
+        ctx = content_nc[m.start(): min(len(content_nc), m.end() + 300)]
+        if "DIRECT" in ctx:
             _add("Plain hostnames (unqualified) → DIRECT", "isPlainHostName")
+            break
 
     # ── 6. Non-HTTP/S protocols → DIRECT ─────────────────────────────────────
     if re.search(r"url\.substring.*!=.*https?.*DIRECT", content_nc, re.DOTALL):
@@ -319,6 +322,8 @@ def _build_traffic_profile(
         "enablePac": enable_pac,
         "ziaPacFileId": zia_pac_file_id,
         "ziaPacFileName": zia_pac_file_name,
+        # _fetch_pac_bypasses uses blocking urllib — safe here because
+        # get_traffic_profile is a sync def, so FastAPI runs it in a thread pool.
         "bypasses": _fetch_pac_bypasses(fp_pac_url) if fp_pac_url else [],
         "appProfileBypasses": _fetch_pac_bypasses(pac_url) if pac_url else [],
     }

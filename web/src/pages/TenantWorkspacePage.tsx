@@ -6848,7 +6848,7 @@ function AppProfileVisualizer({
   // API field: use_tunnel2_for_proxied_web_traffic (snake_case DB) or useTunnel2ForProxiedWebTraffic (camelCase HTTP)
   const ctxHasZT2Proxied = (ctx: string): boolean => {
     const a = getCtxFpAction(ctx);
-    if (Object.keys(a).length === 0) return data?.listeningProxy ?? false;
+    if (Object.keys(a).length === 0) return false;
     return Boolean(a.useTunnel2ForProxiedWebTraffic || a.use_tunnel2_for_proxied_web_traffic);
   };
 
@@ -7446,7 +7446,10 @@ function AppProfileVisualizer({
 
               {/* ── Traffic Simulator ────────────────────────────────────────── */}
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
-                <p className="text-xs font-medium text-gray-500 uppercase mb-2">Traffic Simulator</p>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-medium text-gray-500 uppercase">Traffic Simulator</p>
+                  <p className="text-xs text-gray-400 italic">Results based on parsed PAC rules — complex PAC logic may not be fully represented</p>
+                </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="text"
