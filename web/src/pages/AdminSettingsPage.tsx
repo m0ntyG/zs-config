@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchSettings, patchSettings, SystemSettings, fetchSystemInfo, sendTestUpdateEmail } from "../api/system";
-import { importDatabase, ImportDbResult, clearData, ClearDataResult, rotateKey, RotateKeyResult } from "../api/admin";
+import { importDatabase, ImportDbResult, clearData, ClearDataResult, rotateKey, RotateKeyResult, exportDatabaseYaml } from "../api/admin";
 import { fetchTenants, Tenant } from "../api/tenants";
 import {
   fetchSSLStatus, SSLStatus,
@@ -867,6 +867,9 @@ function DatabaseMaintenanceCard({
       <p className="text-sm font-semibold text-gray-700 mb-1">Import Database</p>
       <ImportDatabaseSection />
       <hr className="border-gray-100" />
+      <p className="text-sm font-semibold text-gray-700 mb-1">Export Database (YAML)</p>
+      <ExportDatabaseYamlSection />
+      <hr className="border-gray-100" />
       <p className="text-sm font-semibold text-gray-700 mb-1">Clear Data</p>
       <ClearDataSection />
       <hr className="border-gray-100" />
@@ -974,6 +977,44 @@ function ImportDatabaseSection() {
           className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
         >
           {loading ? "Importing…" : "Import Database"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Export Database YAML section ──────────────────────────────────────────────
+
+function ExportDatabaseYamlSection() {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handleExport() {
+    setLoading(true);
+    setErr(null);
+    try {
+      await exportDatabaseYaml();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-gray-500">
+        Export the entire database as a human-readable YAML file.
+        Sensitive secrets (like passwords and tenant keys) are permanently redacted.
+      </p>
+      {err && <p className="text-xs text-red-600">{err}</p>}
+      <div>
+        <button
+          onClick={handleExport}
+          disabled={loading}
+          className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
+        >
+          {loading ? "Exporting…" : "Export to YAML"}
         </button>
       </div>
     </div>

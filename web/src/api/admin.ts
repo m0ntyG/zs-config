@@ -117,3 +117,27 @@ export function rotateKey(algorithm: string): Promise<RotateKeyResult> {
     body: JSON.stringify({ algorithm }),
   });
 }
+
+export async function exportDatabaseYaml(): Promise<void> {
+  const token = localStorage.getItem("token");
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch("/api/v1/admin/export-db-yaml", { headers });
+  if (!response.ok) {
+    throw new Error("Failed to export database as YAML");
+  }
+
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "zscaler_db_export.yaml";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+}
+

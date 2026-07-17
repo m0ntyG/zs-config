@@ -351,3 +351,55 @@ def set_setting(key: str, value: str) -> None:
             session.add(AppSettings(key=key, value=value))
         else:
             row.value = value
+
+
+def export_db_to_yaml_string() -> str:
+    """Serialize the entire database to a redacted YAML string."""
+    import yaml
+    from datetime import datetime
+    from .models import (
+        AppSettings, User, TenantConfig, Certificate, WebAuthnCredential,
+        UserTenantEntitlement, ScheduledTask, TaskRunHistory, ZIAResource,
+        ZPAResource, ZCCResource, RestorePoint, ZIATemplate, ZCCSnapshot,
+        ZCCSnapshotItem, SyncLog, AuditLog
+    )
+
+    with get_session() as session:
+        data = {}
+        models = [
+            AppSettings,
+            User,
+            TenantConfig,
+            Certificate,
+            WebAuthnCredential,
+            UserTenantEntitlement,
+            ScheduledTask,
+            TaskRunHistory,
+            ZIAResource,
+            ZPAResource,
+            ZCCResource,
+            RestorePoint,
+            ZIATemplate,
+            ZCCSnapshot,
+            ZCCSnapshotItem,
+            SyncLog,
+            AuditLog,
+        ]
+
+        for model in models:
+            table_name = model.__tablename__
+            rows = session.query(model).all()
+            data[table_name] = []
+            for row in rows:
+                row_dict = {}
+                for col in model.__table__.columns:
+                    val = getattr(row, col.name)
+                    if col.name in ("client_secret_enc", "password_hash", "public_key") and val is not None:
+                        val = "<REDACTED>"
+                    elif isinstance(val, datetime):
+                        val = val.isoformat()
+                    row_dict[col.name] = val
+                data[table_name].append(row_dict)
+
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+

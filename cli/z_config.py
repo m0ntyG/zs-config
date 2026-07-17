@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """zs-config — interactive TUI for Zscaler OneAPI.
 
-Installed usage:  zs-config
-Development:      pip install -e .  then  zs-config
+Usage (standalone):  uvx zs-config
+Development:         uvx --from . zs-config   (or  uv run zs-config)
 """
 
 

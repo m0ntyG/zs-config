@@ -101,6 +101,13 @@ Export your existing database and encryption key, then import via **Admin → Se
 
 Upload `zscaler.db` and `secret.key` from that directory. All schema migrations are applied automatically.
 
+### Database Export (YAML)
+
+To allow safe sharing, auditing, and version control, you can export the entire database as a human-readable YAML file. All sensitive credentials, keys, and password hashes are **permanently redacted** during the export process.
+
+* **In the Web UI:** Navigate to **Admin → Settings → Database Maintenance** and click **Export to YAML** to download the export.
+* **In the TUI/CLI:** Go to **Settings → Export Database to YAML (Redacted)** and enter the desired file path on your local machine.
+
 ---
 
 ## Web UI Features
@@ -123,7 +130,7 @@ All Devices (list/search/OTP), Trusted Networks, Forwarding Profiles, App Profil
 Users, Groups (with members), API Clients (details and secrets)
 
 **Admin (admin-only)**
-User Management, Tenant Entitlements, System Settings (session timeout, idle timeout, login attempts, audit retention, IdP, SSL mode), Clear Data, Import Database
+User Management, Tenant Entitlements, System Settings (session timeout, idle timeout, login attempts, audit retention, IdP, SSL mode), Clear Data, Import Database, Export Database (YAML)
 
 ---
 
@@ -188,10 +195,11 @@ v3.0.0+ requires `libsqlcipher` on your system before installing. The TUI auto-u
 | openSUSE | `sudo zypper install sqlcipher-devel` |
 
 ```bash
-pipx install zs-config   # recommended
-# or
-pip install zs-config
+# Run the standalone TUI directly with uvx (recommended)
+uvx zs-config
 
+# Or install globally using pipx
+pipx install zs-config
 zs-config
 ```
 
@@ -209,6 +217,14 @@ python -m cli.z_config
 ```bash
 git clone https://github.com/mpreissner/zs-config.git
 cd zs-config
+
+# Run the standalone TUI instantly using uvx:
+uvx --from . zs-config
+
+# Or using standard uv:
+uv run zs-config
+
+# Or traditional pip:
 pip install -e .
 zs-config
 ```

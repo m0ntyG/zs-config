@@ -235,6 +235,7 @@ def settings_menu():
                 questionary.Choice("List Tenants", value="list"),
                 questionary.Choice("Remove Tenant", value="remove"),
                 questionary.Separator(),
+                questionary.Choice("Export Database to YAML (Redacted)", value="export_yaml"),
                 questionary.Choice("Clear Imported Data & Audit Log", value="cleardata"),
                 questionary.Separator(),
                 questionary.Choice("Security: Rotate Encryption Key", value="rotate_key"),
@@ -253,6 +254,8 @@ def settings_menu():
             _list_tenants()
         elif choice == "remove":
             _remove_tenant()
+        elif choice == "export_yaml":
+            _export_database_yaml()
         elif choice == "cleardata":
             _clear_imported_data()
         elif choice == "rotate_key":
@@ -835,6 +838,39 @@ def _clear_imported_data():
         f"{sync_count} sync logs, "
         f"{audit_count} audit entries."
     )
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Export Database YAML
+# ------------------------------------------------------------------
+
+def _export_database_yaml():
+    console.print(
+        "\n[bold]Export Database to YAML (Redacted)[/bold]\n"
+        "[dim]Exports all database tables into a single human-readable YAML file.\n"
+        "All credentials, passwords, and public keys will be permanently redacted.[/dim]\n"
+    )
+
+    file_path = questionary.text(
+        "Enter export file path:",
+        default="zscaler_db_export.yaml",
+    ).ask()
+    if not file_path:
+        return
+
+    try:
+        from db.database import export_db_to_yaml_string
+        with console.status("[cyan]Generating YAML export...[/cyan]"):
+            yaml_content = export_db_to_yaml_string()
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(yaml_content)
+
+        console.print(f"[green]✓ Database successfully exported to [bold]{file_path}[/bold] (redacted).[/green]")
+    except Exception as exc:
+        console.print(f"[red]✗ Export failed: {exc}[/red]")
+
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 

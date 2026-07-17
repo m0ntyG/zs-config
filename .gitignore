@@ -57,3 +57,15 @@ certs/
 
 # Other
 scripts/dump_tenant_creds.py
+.code-review-graph
+
+*.key
+*.env
+zs_db
+zs_plugin
+
+# Database export
+zscaler_db_export.yaml
+
+# Plan
+/plan

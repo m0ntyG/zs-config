@@ -348,3 +348,24 @@ async def import_database(
         "temp_password": temp_password,
     }
 
+
+# ── Database Export YAML ──────────────────────────────────────────────────────
+
+@router.get("/export-db-yaml")
+def export_db_yaml(_: AuthUser = Depends(require_admin)):
+    """Export the entire database as a redacted YAML file."""
+    from fastapi.responses import Response
+    from db.database import export_db_to_yaml_string
+
+    try:
+        yaml_content = export_db_to_yaml_string()
+        return Response(
+            content=yaml_content,
+            media_type="application/x-yaml",
+            headers={"Content-Disposition": 'attachment; filename="zscaler_db_export.yaml"'}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Export failed: {exc}")
+
+
+
